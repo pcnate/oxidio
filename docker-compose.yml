@@ -1,0 +1,102 @@
+services:
+  # Development shell - mount source and build interactively
+  dev:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/app
+      - cargo-cache:/root/.cargo/registry
+      - target-cache:/app/target
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    command: bash
+
+  # Build Linux binary
+  build-linux:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/app
+      - cargo-cache:/root/.cargo/registry
+      - target-cache:/app/target
+    working_dir: /app
+    command: >
+      bash -c "cargo build --release &&
+               strip target/release/oxidio &&
+               mkdir -p /app/dist &&
+               cp target/release/oxidio /app/dist/oxidio &&
+               echo 'Linux binary: dist/oxidio'"
+
+  # Build Windows binary
+  build-windows:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/app
+      - cargo-cache:/root/.cargo/registry
+      - target-cache:/app/target
+    working_dir: /app
+    command: >
+      bash -c "cargo build --release --target x86_64-pc-windows-gnu &&
+               x86_64-w64-mingw32-strip target/x86_64-pc-windows-gnu/release/oxidio.exe &&
+               mkdir -p /app/dist &&
+               cp target/x86_64-pc-windows-gnu/release/oxidio.exe /app/dist/oxidio.exe &&
+               echo 'Windows binary: dist/oxidio.exe'"
+
+  # Build both targets
+  build-all:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/app
+      - cargo-cache:/root/.cargo/registry
+      - target-cache:/app/target
+    working_dir: /app
+    command: >
+      bash -c "
+        mkdir -p /app/dist &&
+        echo '=== Building Linux ===' &&
+        cargo build --release &&
+        strip target/release/oxidio &&
+        cp target/release/oxidio /app/dist/oxidio &&
+        echo '=== Building Windows ===' &&
+        cargo build --release --target x86_64-pc-windows-gnu &&
+        x86_64-w64-mingw32-strip target/x86_64-pc-windows-gnu/release/oxidio.exe &&
+        cp target/x86_64-pc-windows-gnu/release/oxidio.exe /app/dist/oxidio.exe &&
+        echo '=== Build Complete ===' &&
+        echo 'Linux:   dist/oxidio' &&
+        echo 'Windows: dist/oxidio.exe'
+      "
+
+  # Run tests
+  test:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/app
+      - cargo-cache:/root/.cargo/registry
+      - target-cache:/app/target
+    working_dir: /app
+    command: cargo test
+
+  # Check code (fast compile check without building)
+  check:
+    build:
+      context: .
+      target: builder
+    volumes:
+      - .:/app
+      - cargo-cache:/root/.cargo/registry
+      - target-cache:/app/target
+    working_dir: /app
+    command: cargo check --all-targets
+
+volumes:
+  cargo-cache:
+  target-cache:

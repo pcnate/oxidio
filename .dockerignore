@@ -1,0 +1,16 @@
+# Build artifacts (handled by volume mounts)
+target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
