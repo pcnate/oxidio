@@ -68,10 +68,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish to crates.io
+      - name: Publish oxidio-core to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: cargo publish -p oxidio-core
+
+      - name: Publish oxidio-cli to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p oxidio-cli
 
   build-windows:
     name: Build Windows
@@ -92,6 +97,11 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p oxidio-cli
 
+      - name: Prepare dist directory
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target\release\oxidio.exe" "dist\oxidio.exe"
+
       - name: Install Inno Setup
         run: choco install innosetup -y
 
@@ -101,7 +111,7 @@ jobs:
 
       - name: Rename artifacts with version
         run: |
-          Copy-Item "target\release\oxidio.exe" "dist\oxidio-${{ needs.release.outputs.new_release_version }}-windows-x64.exe"
+          Copy-Item "dist\oxidio.exe" "dist\oxidio-${{ needs.release.outputs.new_release_version }}-windows-x64.exe"
 
       - name: Upload Windows EXE
         uses: actions/upload-artifact@v4

@@ -24,7 +24,7 @@
       "changelogFile": "CHANGELOG.md"
     }],
     ["@semantic-release/exec", {
-      "prepareCmd": "sed -i 's/^version = \".*\"/version = \"${nextRelease.version}\"/' Cargo.toml crates/*/Cargo.toml"
+      "prepareCmd": "sed -i -e 's/^version = \".*\"/version = \"${nextRelease.version}\"/' -e 's/oxidio-core = { path = \"crates\\/oxidio-core\", version = \".*\" }/oxidio-core = { path = \"crates\\/oxidio-core\", version = \"${nextRelease.version}\" }/' Cargo.toml crates/*/Cargo.toml"
     }],
     ["@semantic-release/git", {
       "assets": [
