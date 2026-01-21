@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-RC.6"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 authors = ["Nathan Baker"]
@@ -35,4 +35,4 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 
 # Internal
-oxidio-core = { path = "crates/oxidio-core", version = "1.0.0-RC.6" }
+oxidio-core = { path = "crates/oxidio-core", version = "1.0.0" }
