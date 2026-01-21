@@ -25,7 +25,8 @@
     }],
     ["@semantic-release-cargo/semantic-release-cargo", {
       "allFeatures": false,
-      "noDefaultFeatures": false
+      "noDefaultFeatures": false,
+      "publish": false
     }],
     ["@semantic-release/git", {
       "assets": [
