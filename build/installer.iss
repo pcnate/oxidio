@@ -1,7 +1,10 @@
 ; Oxidio Music Player - Inno Setup 6+ Installer Script
 
 #define MyAppName "Oxidio"
-#define MyAppVersion "0.1.0"
+; Version can be passed via command line: /DMyAppVersion=1.0.0
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "Oxidio"
 #define MyAppURL "https://github.com/oxidio"
 #define MyAppExeName "oxidio.exe"
