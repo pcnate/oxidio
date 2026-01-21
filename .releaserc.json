@@ -1,44 +1,43 @@
 {
   "branches": [
     "main",
-    {
-      "name": "development",
-      "prerelease": "beta"
-    }
+    "master",
+    { "name": "development", "prerelease": "RC", "channel": "rc" }
   ],
   "plugins": [
-    "@semantic-release/commit-analyzer",
+    ["@semantic-release/commit-analyzer", {
+      "preset": "angular",
+      "releaseRules": [
+        { "type": "deps"                    ,"release": "patch" },
+        { "type": "chore"                   ,"release": "patch" },
+        { "type": "docs", "scope": "README" ,"release": "patch" },
+        { "type": "refactor"                ,"release": "patch" },
+        { "type": "style"                   ,"release": "patch" },
+        { "type": "ci"                      ,"release": "patch" }
+      ],
+      "parserOpts": {
+        "noteKeywords": ["BREAKING CHANGE", "BREAKING CHANGES"]
+      }
+    }],
     "@semantic-release/release-notes-generator",
-    [
-      "@semantic-release/changelog",
-      {
-        "changelogFile": "CHANGELOG.md"
-      }
-    ],
-    [
-      "@semantic-release-cargo/semantic-release-cargo",
-      {
-        "allFeatures": false,
-        "noDefaultFeatures": false
-      }
-    ],
-    [
-      "@semantic-release/git",
-      {
-        "assets": [
-          "CHANGELOG.md",
-          "Cargo.toml",
-          "Cargo.lock",
-          "crates/*/Cargo.toml"
-        ],
-        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
-      }
-    ],
-    [
-      "@semantic-release/github",
-      {
-        "assets": []
-      }
-    ]
+    ["@semantic-release/changelog", {
+      "changelogFile": "CHANGELOG.md"
+    }],
+    ["@semantic-release-cargo/semantic-release-cargo", {
+      "allFeatures": false,
+      "noDefaultFeatures": false
+    }],
+    ["@semantic-release/git", {
+      "assets": [
+        "CHANGELOG.md",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/*/Cargo.toml"
+      ],
+      "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+    }],
+    ["@semantic-release/github", {
+      "assets": []
+    }]
   ]
 }
