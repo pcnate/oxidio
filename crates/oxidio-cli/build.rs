@@ -9,9 +9,15 @@ fn main() {
             res.set_windres_path( "x86_64-w64-mingw32-windres" );
         }
 
+        // Get version from Cargo.toml
+        let version = std::env::var( "CARGO_PKG_VERSION" ).unwrap_or_else( |_| "0.0.0".to_string() );
+
         res.set( "ProductName", "Oxidio" );
         res.set( "FileDescription", "Oxidio Music Player" );
         res.set( "OriginalFilename", "oxidio.exe" );
+        res.set( "ProductVersion", &version );
+        res.set( "FileVersion", &version );
+        res.set_icon( "../../icon.ico" );
         res.compile().expect( "Failed to compile Windows resources" );
     }
 }

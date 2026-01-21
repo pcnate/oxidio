@@ -30,3 +30,6 @@ Thumbs.db
 
 # Test files
 test.mp3
+
+# Node.js (semantic-release)
+node_modules/
