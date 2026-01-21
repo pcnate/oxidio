@@ -1,3 +1,5 @@
+# [1.0.0-RC.6](https://github.com/pcnate/oxidio/compare/v1.0.0-RC.5...v1.0.0-RC.6) (2026-01-21)
+
 # [1.0.0-RC.5](https://github.com/pcnate/oxidio/compare/v1.0.0-RC.4...v1.0.0-RC.5) (2026-01-21)
 
 # [1.0.0-RC.4](https://github.com/pcnate/oxidio/compare/v1.0.0-RC.3...v1.0.0-RC.4) (2026-01-21)
