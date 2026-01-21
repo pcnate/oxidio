@@ -8,8 +8,8 @@
   },
   "devDependencies": {
     "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/exec": "^6.0.3",
     "@semantic-release/git": "^10.0.1",
-    "@semantic-release-cargo/semantic-release-cargo": "^2.4.81",
     "semantic-release": "^24.0.0"
   }
 }
