@@ -1,3 +1,11 @@
+# [1.1.0-RC.1](https://github.com/pcnate/oxidio/compare/v1.0.0...v1.1.0-RC.1) (2026-02-26)
+
+
+### Features
+
+* Add command suggestions & cover art support ([931732a](https://github.com/pcnate/oxidio/commit/931732a966e8fb8a9be6aabfd76ae7dd39184865))
+* Add web/ctl/protocol crates and integrations ([090d4ed](https://github.com/pcnate/oxidio/commit/090d4ed4d85bd84ee05bc03c2e94432f06f32710))
+
 # 1.0.0 (2026-01-21)
 
 
