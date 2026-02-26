@@ -13,9 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 oxidio-core.workspace = true
-oxidio-protocol = { path = "../oxidio-protocol" }
-oxidio-ctl = { path = "../oxidio-ctl" }
-oxidio-web = { path = "../oxidio-web", optional = true }
+oxidio-protocol.workspace = true
+oxidio-ctl.workspace = true
+oxidio-web = { workspace = true, optional = true }
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true

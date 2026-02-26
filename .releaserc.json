@@ -24,7 +24,7 @@
       "changelogFile": "CHANGELOG.md"
     }],
     ["@semantic-release/exec", {
-      "prepareCmd": "sed -i -e 's/^version = \".*\"/version = \"${nextRelease.version}\"/' -e 's/oxidio-core = { path = \"crates\\/oxidio-core\", version = \".*\" }/oxidio-core = { path = \"crates\\/oxidio-core\", version = \"${nextRelease.version}\" }/' Cargo.toml crates/*/Cargo.toml"
+      "prepareCmd": "sed -i -e 's/^version = \".*\"/version = \"${nextRelease.version}\"/' -e 's/oxidio-core = { path = \"crates\\/oxidio-core\", version = \".*\" }/oxidio-core = { path = \"crates\\/oxidio-core\", version = \"${nextRelease.version}\" }/' -e 's/oxidio-protocol = { path = \"crates\\/oxidio-protocol\", version = \".*\" }/oxidio-protocol = { path = \"crates\\/oxidio-protocol\", version = \"${nextRelease.version}\" }/' -e 's/oxidio-ctl = { path = \"crates\\/oxidio-ctl\", version = \".*\" }/oxidio-ctl = { path = \"crates\\/oxidio-ctl\", version = \"${nextRelease.version}\" }/' -e 's/oxidio-web = { path = \"crates\\/oxidio-web\", version = \".*\" }/oxidio-web = { path = \"crates\\/oxidio-web\", version = \"${nextRelease.version}\" }/' Cargo.toml crates/*/Cargo.toml"
     }],
     ["@semantic-release/git", {
       "assets": [

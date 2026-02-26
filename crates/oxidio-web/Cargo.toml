@@ -8,8 +8,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-oxidio-protocol = { path = "../oxidio-protocol" }
-oxidio-ctl = { path = "../oxidio-ctl" }
+oxidio-protocol.workspace = true
+oxidio-ctl.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 axum.workspace = true
