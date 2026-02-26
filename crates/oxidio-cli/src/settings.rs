@@ -17,6 +17,15 @@ pub struct Settings {
 
     /// Enable System Media Transport Controls (Windows)
     pub smtc_enabled: bool,
+
+    /// Enable the web interface
+    pub web_enabled: bool,
+
+    /// Web server port
+    pub web_port: u16,
+
+    /// Web server bind address
+    pub web_bind: String,
 }
 
 
@@ -25,6 +34,9 @@ impl Default for Settings {
         Self {
             discord_enabled: true,
             smtc_enabled: true,
+            web_enabled: false,
+            web_port: 8384,
+            web_bind: "127.0.0.1".to_string(),
         }
     }
 }

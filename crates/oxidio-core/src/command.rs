@@ -38,6 +38,8 @@ pub enum Command {
     Dedup,
     Save { name: String },
     Load { name: String },
+    ListPlaylists,
+    DeletePlaylist { name: String },
     Shuffle,
     Repeat { mode: Option<RepeatModeArg> },
 
@@ -120,6 +122,54 @@ impl Command {
                     .ok_or_else( || CommandError::MissingArgument( "playlist name".into() ) )?;
                 Ok( Command::Load { name: name.to_string() } )
             }
+            "playlist" | "pl" => {
+                let sub_args = args
+                    .ok_or_else( || CommandError::MissingArgument( "subcommand (list|save|load|delete)".into() ) )?;
+                let mut sub_parts = sub_args.splitn( 2, ' ' );
+                let sub_cmd = sub_parts.next().unwrap_or( "" ).to_lowercase();
+                let sub_arg = sub_parts.next().map( |s| s.trim() );
+
+                match sub_cmd.as_str() {
+                    "list" | "ls" => Ok( Command::ListPlaylists ),
+                    "save" => {
+                        let name = sub_arg
+                            .ok_or_else( || CommandError::MissingArgument( "playlist name".into() ) )?;
+                        Ok( Command::Save { name: name.to_string() } )
+                    }
+                    "load" => {
+                        let name = sub_arg
+                            .ok_or_else( || CommandError::MissingArgument( "playlist name".into() ) )?;
+                        Ok( Command::Load { name: name.to_string() } )
+                    }
+                    "delete" | "del" | "rm" => {
+                        let name = sub_arg
+                            .ok_or_else( || CommandError::MissingArgument( "playlist name".into() ) )?;
+                        Ok( Command::DeletePlaylist { name: name.to_string() } )
+                    }
+                    "" => Err( CommandError::MissingArgument( "subcommand (list|save|load|delete)".into() ) ),
+                    other => Err( CommandError::Unknown( format!( "playlist {}", other ) ) ),
+                }
+            }
+            "queue" | "q" => {
+                let sub_args = args
+                    .ok_or_else( || CommandError::MissingArgument( "subcommand (add|remove|clear|dedup)".into() ) )?;
+                let mut sub_parts = sub_args.splitn( 2, ' ' );
+                let sub_cmd = sub_parts.next().unwrap_or( "" ).to_lowercase();
+                let sub_arg = sub_parts.next().map( |s| s.trim() );
+
+                match sub_cmd.as_str() {
+                    "add" | "a" => {
+                        let path = sub_arg
+                            .ok_or_else( || CommandError::MissingArgument( "path".into() ) )?;
+                        Ok( Command::Add { path: PathBuf::from( path ) } )
+                    }
+                    "remove" | "rm" | "del" => Ok( Command::Remove ),
+                    "clear" | "cl" => Ok( Command::Clear ),
+                    "dedup" | "dedupe" | "unique" => Ok( Command::Dedup ),
+                    "" => Err( CommandError::MissingArgument( "subcommand (add|remove|clear|dedup)".into() ) ),
+                    other => Err( CommandError::Unknown( format!( "queue {}", other ) ) ),
+                }
+            }
             "shuffle" | "sh" => Ok( Command::Shuffle ),
             "repeat" | "rep" => {
                 let mode = args.map( |s| s.parse() ).transpose()?;
@@ -176,6 +226,8 @@ impl Command {
             Command::Dedup => "Remove duplicate tracks",
             Command::Save { .. } => "Save playlist",
             Command::Load { .. } => "Load playlist",
+            Command::ListPlaylists => "List saved playlists",
+            Command::DeletePlaylist { .. } => "Delete saved playlist",
             Command::Shuffle => "Toggle shuffle",
             Command::Repeat { .. } => "Set repeat mode",
             Command::Goto { .. } => "Navigate to path",
@@ -220,13 +272,19 @@ fn parse_time( s: &str ) -> Result<Duration, CommandError> {
 
 /// Returns help text listing all available commands.
 pub fn help_text() -> &'static str {
-    r#"Playlist Commands:
-  /add <path>     Add file/folder to playlist
-  /remove         Remove selected track
-  /clear          Clear playlist
-  /dedup          Remove duplicate tracks
-  /shuffle        Toggle shuffle mode
-  /repeat [mode]  Set repeat (off/one/all)
+    r#"Queue Commands:
+  /queue add <path>   Add file/folder to queue
+  /queue remove       Remove selected track
+  /queue clear        Clear queue
+  /queue dedup        Remove duplicate tracks
+
+Playlist Commands:
+  /playlist list      List saved playlists
+  /playlist save <n>  Save playlist
+  /playlist load <n>  Load playlist
+  /playlist delete <n>  Delete saved playlist
+  /shuffle            Toggle shuffle mode
+  /repeat [mode]      Set repeat (off/one/all)
 
 Navigation Commands:
   /goto <path>    Navigate browser to path

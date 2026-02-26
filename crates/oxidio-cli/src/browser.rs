@@ -94,7 +94,7 @@ impl FileBrowser {
 
                 if is_dir {
                     dirs.push( browser_entry );
-                } else {
+                } else if is_audio {
                     files.push( browser_entry );
                 }
             }

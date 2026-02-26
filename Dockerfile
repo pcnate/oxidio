@@ -26,11 +26,17 @@ WORKDIR /app
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock* ./
 COPY crates/oxidio-core/Cargo.toml ./crates/oxidio-core/
+COPY crates/oxidio-protocol/Cargo.toml ./crates/oxidio-protocol/
+COPY crates/oxidio-ctl/Cargo.toml ./crates/oxidio-ctl/
+COPY crates/oxidio-web/Cargo.toml ./crates/oxidio-web/
 COPY crates/oxidio-cli/Cargo.toml ./crates/oxidio-cli/
 
 # Create dummy source files for dependency compilation
-RUN mkdir -p crates/oxidio-core/src crates/oxidio-cli/src && \
+RUN mkdir -p crates/oxidio-core/src crates/oxidio-protocol/src crates/oxidio-ctl/src crates/oxidio-web/src crates/oxidio-web/static crates/oxidio-cli/src && \
     echo "pub fn dummy() {}" > crates/oxidio-core/src/lib.rs && \
+    echo "pub fn dummy() {}" > crates/oxidio-protocol/src/lib.rs && \
+    echo "pub fn dummy() {}" > crates/oxidio-ctl/src/lib.rs && \
+    echo "pub fn dummy() {}" > crates/oxidio-web/src/lib.rs && \
     echo "fn main() {}" > crates/oxidio-cli/src/main.rs
 
 # Build dependencies (cached layer)
@@ -38,7 +44,7 @@ RUN cargo build --release || true
 RUN cargo build --release --target x86_64-pc-windows-gnu || true
 
 # Remove dummy files
-RUN rm -rf crates/oxidio-core/src crates/oxidio-cli/src
+RUN rm -rf crates/oxidio-core/src crates/oxidio-protocol/src crates/oxidio-ctl/src crates/oxidio-web/src crates/oxidio-web/static crates/oxidio-cli/src
 
 # Copy actual source
 COPY crates/ ./crates/

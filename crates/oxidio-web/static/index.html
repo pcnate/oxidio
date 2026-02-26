@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oxidio</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <div id="header">
+            <span class="logo">OXIDIO</span>
+            <div class="tabs">
+                <button class="active" data-view="playlist">Playlist</button>
+                <button data-view="browser">Browser</button>
+                <button data-view="trackinfo">Info</button>
+                <button data-view="settings">Settings</button>
+                <button data-view="help">Help</button>
+            </div>
+        </div>
+
+        <!-- Main content area -->
+        <div id="content">
+            <div id="playlist-view" class="view active">
+                <ul class="track-list" id="track-list"></ul>
+            </div>
+
+            <div id="browser-view" class="view">
+                <div class="browser-header">
+                    <input type="text" id="browser-path" autocomplete="off" spellcheck="false" placeholder="/">
+                </div>
+                <ul class="browser-list" id="browser-list"></ul>
+            </div>
+
+            <div id="trackinfo-view" class="view">
+                <div class="track-info-grid" id="track-info-grid">
+                    <span class="label">No track playing</span>
+                    <span class="value"></span>
+                </div>
+            </div>
+
+            <div id="settings-view" class="view">
+                <ul class="settings-list" id="settings-list"></ul>
+            </div>
+
+            <div id="help-view" class="view">
+                <div class="help-section">
+                    <h3>Keyboard Shortcuts</h3>
+                    <div class="help-grid">
+                        <span class="key">/</span><span class="desc">Open command bar</span>
+                        <span class="key">Space</span><span class="desc">Play / Pause</span>
+                        <span class="key">Left / Right</span><span class="desc">Previous / Next track</span>
+                        <span class="key">+/-</span><span class="desc">Volume up / down</span>
+                        <span class="key">s</span><span class="desc">Toggle shuffle</span>
+                        <span class="key">r</span><span class="desc">Cycle repeat mode</span>
+                        <span class="key">Tab</span><span class="desc">Switch views</span>
+                    </div>
+                </div>
+                <div class="help-section">
+                    <h3>Slash Commands</h3>
+                    <div class="help-grid">
+                        <span class="key">/add &lt;path&gt;</span><span class="desc">Add file/folder to playlist</span>
+                        <span class="key">/clear</span><span class="desc">Clear playlist</span>
+                        <span class="key">/dedup</span><span class="desc">Remove duplicate tracks</span>
+                        <span class="key">/shuffle</span><span class="desc">Toggle shuffle mode</span>
+                        <span class="key">/repeat [mode]</span><span class="desc">Set repeat (off/one/all)</span>
+                        <span class="key">/playlist list</span><span class="desc">List saved playlists</span>
+                        <span class="key">/playlist save &lt;name&gt;</span><span class="desc">Save playlist</span>
+                        <span class="key">/playlist load &lt;name&gt;</span><span class="desc">Load playlist</span>
+                        <span class="key">/playlist delete &lt;name&gt;</span><span class="desc">Delete saved playlist</span>
+                        <span class="key">/play</span><span class="desc">Play selected track</span>
+                        <span class="key">/pause</span><span class="desc">Pause playback</span>
+                        <span class="key">/stop</span><span class="desc">Stop playback</span>
+                        <span class="key">/next</span><span class="desc">Next track</span>
+                        <span class="key">/prev</span><span class="desc">Previous track</span>
+                        <span class="key">/seek &lt;time&gt;</span><span class="desc">Seek to position (e.g. 1:30)</span>
+                        <span class="key">/vol [0-100]</span><span class="desc">Set volume</span>
+                        <span class="key">/goto &lt;path&gt;</span><span class="desc">Navigate browser to path</span>
+                        <span class="key">/home</span><span class="desc">Go to home directory</span>
+                    </div>
+                </div>
+                <div class="help-section">
+                    <h3>Playlist</h3>
+                    <div class="help-grid">
+                        <span class="key">Enter</span><span class="desc">Play selected track</span>
+                        <span class="key">Delete</span><span class="desc">Remove selected track</span>
+                        <span class="key">J / K</span><span class="desc">Move track down / up</span>
+                    </div>
+                </div>
+                <div class="help-section">
+                    <h3>Browser</h3>
+                    <div class="help-grid">
+                        <span class="key">Enter</span><span class="desc">Open directory</span>
+                        <span class="key">a</span><span class="desc">Add to playlist</span>
+                        <span class="key">Backspace</span><span class="desc">Go up</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Now Playing bar -->
+        <div id="now-playing">
+            <div class="np-row">
+                <div class="np-controls">
+                    <button id="btn-prev" title="Previous">|&lt;</button>
+                    <button id="btn-play" title="Play/Pause">&#9654;</button>
+                    <button id="btn-stop" title="Stop">&#9632;</button>
+                    <button id="btn-next" title="Next">&gt;|</button>
+                    <span class="np-separator"></span>
+                    <button id="btn-shuffle" class="mode-btn" title="Toggle Shuffle">&#x1F500;</button>
+                    <button id="btn-repeat" class="mode-btn" title="Cycle Repeat">&#x1F501;</button>
+                </div>
+                <div class="np-info">
+                    <div class="np-title" id="np-title">No track loaded</div>
+                    <div class="np-artist" id="np-artist"></div>
+                </div>
+                <div class="np-time">
+                    <span id="np-position">0:00</span> / <span id="np-duration">0:00</span>
+                </div>
+            </div>
+            <div class="np-progress-row">
+                <div class="np-progress-bar" id="np-progress-bar">
+                    <div class="np-progress-fill" id="np-progress-fill"></div>
+                </div>
+                <div class="np-volume">
+                    <button id="btn-vol-down">-</button>
+                    <span class="vol-label" id="vol-label">100%</span>
+                    <button id="btn-vol-up">+</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Command bar -->
+        <div id="command-bar" class="hidden">
+            <span class="cmd-prefix">/</span>
+            <input type="text" id="cmd-input" autocomplete="off" spellcheck="false" placeholder="type a command...">
+        </div>
+
+        <!-- Status bar -->
+        <div id="status-bar">
+            <div class="mode-badges" id="mode-badges"></div>
+            <span class="status-msg" id="status-msg"></span>
+            <span class="conn-status" id="conn-status">Connected</span>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

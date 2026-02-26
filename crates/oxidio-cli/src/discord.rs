@@ -29,6 +29,18 @@ impl DiscordPresence {
     }
 
 
+    /// Creates an inactive Discord presence handler without connecting.
+    ///
+    /// Use this when Discord integration is disabled in settings.
+    pub fn new_inactive() -> Self {
+        Self {
+            client: None,
+            connected: false,
+            last_track: None,
+        }
+    }
+
+
     /// Attempts to connect to Discord.
     fn connect( &mut self ) {
         let mut client = DiscordIpcClient::new( DISCORD_APP_ID );

@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 oxidio-core.workspace = true
+oxidio-protocol = { path = "../oxidio-protocol" }
+oxidio-ctl = { path = "../oxidio-ctl" }
+oxidio-web = { path = "../oxidio-web", optional = true }
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true
@@ -35,6 +38,10 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
 ] }
+
+[features]
+default = ["web"]
+web = ["oxidio-web"]
 
 [build-dependencies]
 winres = "0.1"

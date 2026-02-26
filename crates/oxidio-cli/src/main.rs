@@ -4,13 +4,14 @@ mod browser;
 mod cli;
 mod discord;
 mod input;
+mod integrations;
 mod media_controls;
 mod settings;
 mod view;
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -25,13 +26,10 @@ use ratatui::{
     prelude::*,
     widgets::{ Block, Borders, List, ListItem, ListState, Paragraph, Wrap },
 };
-#[cfg( target_os = "windows" )]
-use souvlaki::{ MediaMetadata, MediaPlayback };
 
 use browser::FileBrowser;
 use cli::Args;
 use input::{ InputBuffer, InputMode };
-use media_controls::{ create_media_controls_channel, MediaControlCommand, MediaControlsHandler };
 use view::{ ViewMode, VisualizerStyle };
 
 use oxidio_core::{
@@ -40,31 +38,19 @@ use oxidio_core::{
     player::PlaybackState,
     Command, Player, RepeatMode,
 };
-
-
-/// Converts a file path to a file:// URL for SMTC album art.
-#[cfg( target_os = "windows" )]
-fn path_to_file_url( path: &std::path::Path ) -> Option<String> {
-    // Get absolute path
-    let abs_path = path.canonicalize().ok()?;
-    let path_str = abs_path.to_string_lossy();
-
-    // Remove the \\?\ prefix that canonicalize adds on Windows
-    let clean_path = path_str.strip_prefix( r"\\?\" ).unwrap_or( &path_str );
-
-    // Souvlaki on Windows strips "file://" and passes the rest to StorageFile::GetFileFromPathAsync
-    // So we need: file://C:/path (NOT file:///C:/path) to get C:/path after stripping
-    // Or just pass the raw path and let souvlaki handle it
-    let url = format!( "file://{}", clean_path );
-    tracing::debug!( "Generated cover URL: {}", url );
-    Some( url )
-}
+use oxidio_ctl::{ CommandProcessor, CommandSender, ControlChannel, ProcessorSettings };
+use oxidio_protocol::{ AppCommand, StateUpdate };
 
 
 /// Application state.
 struct App {
-    player: Player,
+    player: Arc<Player>,
+    command_sender: CommandSender,
+    state_rx: tokio::sync::broadcast::Receiver<StateUpdate>,
     should_quit: bool,
+
+    // CLI web override (Some(true) = --web, Some(false) = --no-web, None = use settings)
+    cli_web_override: Option<bool>,
 
     // View state
     view_mode: ViewMode,
@@ -97,21 +83,12 @@ struct App {
     // Help view scroll offset
     help_scroll: u16,
 
+    // Track change detection (for auto-scroll on advance)
+    last_track: Option<PathBuf>,
+
     // Status message (shown in status bar)
     status_message: Option<String>,
     status_clear_at: Option<std::time::Instant>,
-
-    // Media controls (SMTC/MPRIS)
-    media_controls: Option<MediaControlsHandler>,
-    media_controls_rx: mpsc::Receiver<MediaControlCommand>,
-    last_smtc_state: Option<PlaybackState>,
-    last_smtc_track: Option<PathBuf>,
-    /// Force SMTC metadata update on next tick
-    force_smtc_update: bool,
-
-    // Discord Rich Presence
-    discord: discord::DiscordPresence,
-    last_discord_track: Option<PathBuf>,
 
     // Settings
     settings: settings::Settings,
@@ -121,9 +98,15 @@ struct App {
 
 impl App {
     /// Creates a new App instance.
-    fn new( args: &Args ) -> Result<Self> {
-        let player = Player::new()?;
-
+    ///
+    /// The Player and playlist must already be initialized (created and loaded
+    /// in main). App reads initial state (volume, playlist index) from the player.
+    ///
+    /// @param player - Shared player instance (also held by the CommandProcessor)
+    /// @param command_sender - Sender for the control channel
+    /// @param state_rx - Broadcast receiver for state updates from the processor
+    /// @param args - CLI arguments
+    fn new( player: Arc<Player>, command_sender: CommandSender, state_rx: tokio::sync::broadcast::Receiver<StateUpdate>, args: &Args ) -> Result<Self> {
         // Determine starting directory for browser
         let start_path = args.path.clone()
             .or_else( || dirs::home_dir() )
@@ -138,69 +121,25 @@ impl App {
             ViewMode::Playlist
         };
 
-        let mut initial_track_index: Option<usize> = None;
-        let mut initial_volume: f32 = 1.0;
-
-        // Add any files passed on command line to playlist
-        if !args.files.is_empty() {
+        // Read initial state from the shared player
+        let volume = player.volume();
+        let playlist_index = {
             let playlist_arc = player.playlist();
-            let mut playlist = playlist_arc.write().unwrap();
-            for file in &args.files {
-                if file.is_dir() {
-                    let mut scanner = LibraryScanner::new();
-                    scanner.add_root( file.clone() );
-                    if let Ok( tracks ) = scanner.scan() {
-                        playlist.add_many( tracks.into_iter().map( |t| t.path ) );
-                    }
-                } else {
-                    playlist.add( file.clone() );
-                }
-            }
-        } else {
-            // Try to load last session
-            if let Some( session ) = oxidio_core::Playlist::load_session() {
-                if let Some( dir ) = oxidio_core::Playlist::playlist_dir() {
-                    let path = dir.join( format!( "{}.m3u", session.playlist_name ) );
-                    if let Ok( loaded ) = oxidio_core::Playlist::load( &path ) {
-                        let playlist_arc = player.playlist();
-                        let mut playlist = playlist_arc.write().unwrap();
-                        *playlist = loaded;
-                        playlist.set_shuffle( session.shuffle );
-                        playlist.set_repeat( session.repeat );
-                        initial_track_index = session.track_index;
-                        initial_volume = session.volume;
-                        tracing::info!(
-                            "Restored session: {}, track {}, shuffle={}, repeat={:?}, volume={}",
-                            session.playlist_name,
-                            session.track_index.unwrap_or( 0 ),
-                            session.shuffle,
-                            session.repeat,
-                            session.volume
-                        );
-                    }
-                }
-            }
-        }
-
-        // Initialize media controls (SMTC on Windows, MPRIS on Linux)
-        let ( media_controls_tx, media_controls_rx ) = create_media_controls_channel();
-        let media_controls = MediaControlsHandler::new( media_controls_tx );
-
-        if media_controls.is_some() {
-            tracing::info!( "System media controls initialized" );
-        }
-
-        // Apply initial volume to player
-        player.set_volume( initial_volume );
+            let playlist = playlist_arc.read().unwrap();
+            playlist.current_index()
+        };
 
         let mut playlist_state = ListState::default();
-        if initial_track_index.is_some() {
-            playlist_state.select( initial_track_index );
+        if playlist_index.is_some() {
+            playlist_state.select( playlist_index );
         }
 
         Ok( Self {
             player,
+            command_sender,
+            state_rx,
             should_quit: false,
+            cli_web_override: args.cli_web_override(),
             view_mode,
             playlist_state,
             browser,
@@ -208,21 +147,15 @@ impl App {
             input_buffer: InputBuffer::new(),
             edit_mode: false,
             visualizer_style: VisualizerStyle::default(),
-            volume: initial_volume,
+            volume,
             scroll_to_playing: false,
             last_click_time: None,
             last_click_row: None,
             playlist_area: None,
             help_scroll: 0,
+            last_track: None,
             status_message: None,
             status_clear_at: None,
-            media_controls,
-            media_controls_rx,
-            last_smtc_state: None,
-            last_smtc_track: None,
-            force_smtc_update: false,
-            discord: discord::DiscordPresence::new(),
-            last_discord_track: None,
             settings: settings::Settings::load(),
             settings_selected: 0,
         })
@@ -236,7 +169,15 @@ impl App {
     }
 
 
-    /// Updates app state (clears expired messages, auto-advances tracks, handles media controls).
+    /// Sends a command to the control channel (non-blocking).
+    fn send_command( &self, cmd: AppCommand ) {
+        if let Err( e ) = self.command_sender.try_send( cmd ) {
+            tracing::warn!( "Failed to send command: {}", e );
+        }
+    }
+
+
+    /// Updates app state (clears expired messages, detects track changes, syncs settings).
     fn tick( &mut self ) {
         // Clear expired status messages
         if let Some( clear_at ) = self.status_clear_at {
@@ -246,336 +187,39 @@ impl App {
             }
         }
 
-        // Auto-advance to next track when current track ends
-        if self.player.track_ended() {
-            match self.player.play_next() {
-                Ok( true ) => {
-                    // Successfully started next track - scroll to it without changing selection
-                    self.scroll_to_playing = true;
-                    self.force_smtc_update = true;
+        // Drain broadcast receiver for settings display sync
+        // (Discord/SMTC are managed by the integrations worker, but the TUI
+        // needs to know current settings values for the settings view)
+        loop {
+            match self.state_rx.try_recv() {
+                Ok( StateUpdate::SettingsChanged { settings } ) => {
+                    self.settings.discord_enabled = settings.discord_enabled;
+                    self.settings.smtc_enabled = settings.smtc_enabled;
+                    self.settings.web_enabled = settings.web_enabled;
                 }
-                Ok( false ) => {
-                    // No more tracks in playlist
-                }
-                Err( e ) => {
-                    self.set_status( format!( "Auto-advance error: {}", e ) );
-                }
+                Ok( _ ) => {} // Ignore other updates
+                Err( tokio::sync::broadcast::error::TryRecvError::Empty ) => break,
+                Err( tokio::sync::broadcast::error::TryRecvError::Lagged( _ ) ) => continue,
+                Err( tokio::sync::broadcast::error::TryRecvError::Closed ) => break,
             }
         }
 
-        // Handle media control events (SMTC/MPRIS) - only if enabled
-        while let Ok( cmd ) = self.media_controls_rx.try_recv() {
-            if !self.settings.smtc_enabled {
-                continue; // Ignore SMTC commands when disabled
-            }
-            match cmd {
-                MediaControlCommand::Play => {
-                    if self.player.state() == PlaybackState::Paused {
-                        let _ = self.player.resume();
-                    } else if self.player.state() == PlaybackState::Stopped {
-                        self.play_selected();
-                    }
-                }
-                MediaControlCommand::Pause => {
-                    let _ = self.player.pause();
-                }
-                MediaControlCommand::Toggle => {
-                    match self.player.state() {
-                        PlaybackState::Playing => { let _ = self.player.pause(); }
-                        PlaybackState::Paused => { let _ = self.player.resume(); }
-                        PlaybackState::Stopped => { self.play_selected(); }
-                    }
-                }
-                MediaControlCommand::Stop => {
-                    let _ = self.player.stop();
-                }
-                MediaControlCommand::Next => {
-                    self.play_next();
-                }
-                MediaControlCommand::Previous => {
-                    self.play_previous();
-                }
-            }
-        }
-
-        // Update SMTC state if changed
-        self.update_media_controls();
-
-        // Update Discord Rich Presence
-        self.update_discord();
-    }
-
-
-    /// Updates the system media controls with current playback state and metadata.
-    #[cfg( target_os = "windows" )]
-    fn update_media_controls( &mut self ) {
-        // Check if SMTC is enabled in settings
-        if !self.settings.smtc_enabled {
-            return;
-        }
-
-        let controls = match self.media_controls.as_mut() {
-            Some( c ) => c,
-            None => return,
-        };
-
-        let current_state = self.player.state();
-        let current_track = self.player.current_track();
-
-        // Update playback state if changed
-        if self.last_smtc_state != Some( current_state ) {
-            let playback = match current_state {
-                PlaybackState::Playing => MediaPlayback::Playing { progress: None },
-                PlaybackState::Paused => MediaPlayback::Paused { progress: None },
-                PlaybackState::Stopped => MediaPlayback::Stopped,
-            };
-            controls.set_playback( playback );
-            self.last_smtc_state = Some( current_state );
-        }
-
-        // Update metadata if track changed or forced
-        let should_update = self.force_smtc_update || self.last_smtc_track != current_track;
-        if should_update {
-            self.force_smtc_update = false;
-
-            if let Some( ref track_path ) = current_track {
-                let metadata = self.player.metadata();
-
-                let title = metadata.as_ref()
-                    .and_then( |m| m.title.clone() )
-                    .or_else( || {
-                        track_path.file_stem()
-                            .map( |n| n.to_string_lossy().to_string() )
-                    });
-
-                let artist = metadata.as_ref().and_then( |m| m.artist.clone() );
-                let album = metadata.as_ref().and_then( |m| m.album.clone() );
-
-                // Find album art and copy to temp (SMTC can't access network paths)
-                // Only use cover_url if the file was successfully copied to temp
-                let cover_url = Self::find_album_art( track_path ).filter( |_| {
-                    // Verify temp cover file exists
-                    let temp_path = std::env::temp_dir().join( "oxidio" );
-                    temp_path.read_dir()
-                        .map( |mut entries| entries.any( |e| {
-                            e.map( |e| e.file_name().to_string_lossy().starts_with( "cover." ) )
-                                .unwrap_or( false )
-                        }))
-                        .unwrap_or( false )
-                });
-
-                // Debug: show what we're sending to SMTC
-                tracing::debug!(
-                    "SMTC update: title={:?}, artist={:?}, album={:?}, cover_url={:?}",
-                    title, artist, album, cover_url
-                );
-
-                if let Some( e ) = controls.set_metadata( MediaMetadata {
-                    title: title.as_deref(),
-                    artist: artist.as_deref(),
-                    album: album.as_deref(),
-                    cover_url: cover_url.as_deref(),
-                    duration: self.player.duration(),
-                }) {
-                    tracing::warn!( "SMTC error: {}", e );
-                }
-            }
-            self.last_smtc_track = current_track;
-        }
-    }
-
-
-    /// Finds album art in the same folder as the track.
-    /// Returns a file:// URL if found.
-    #[cfg( target_os = "windows" )]
-    fn find_album_art( track_path: &std::path::Path ) -> Option<String> {
-        let parent = track_path.parent()?;
-
-        // Common album art filenames (case-insensitive search)
-        let art_names = [
-            "cover", "folder", "album", "front", "art", "albumart", "album_art",
-        ];
-        let extensions = [ "jpg", "jpeg", "png", "bmp", "gif" ];
-
-        tracing::debug!( "Looking for album art in: {:?}", parent );
-
-        let mut found_path: Option<std::path::PathBuf> = None;
-
-        // Read directory and do case-insensitive matching (works for UNC paths to Linux NAS)
-        match std::fs::read_dir( parent ) {
-            Ok( entries ) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let filename = path.file_stem()
-                        .and_then( |s| s.to_str() )
-                        .map( |s| s.to_lowercase() );
-                    let ext = path.extension()
-                        .and_then( |e| e.to_str() )
-                        .map( |e| e.to_lowercase() );
-
-                    if let ( Some( name ), Some( ext ) ) = ( filename, ext ) {
-                        // Check if it's an image with a preferred art name
-                        if extensions.contains( &ext.as_str() ) {
-                            if art_names.contains( &name.as_str() ) {
-                                tracing::debug!( "Found album art: {:?}", path );
-                                found_path = Some( path );
-                                break;
-                            }
-                            // Remember any image file as fallback
-                            if found_path.is_none() {
-                                found_path = Some( path );
-                            }
-                        }
-                    }
-                }
-            }
-            Err( e ) => {
-                tracing::warn!( "Failed to read directory {:?}: {}", parent, e );
-            }
-        }
-
-        if found_path.is_none() {
-            tracing::debug!( "No album art found in {:?}", parent );
-        }
-
-        // If we found album art, copy it to temp and return the local path
-        let source_path = found_path?;
-        Self::copy_to_temp_and_get_url( &source_path )
-    }
-
-
-    /// Copies a file to the temp directory and returns a file:// URL to the copy.
-    /// This is needed because SMTC can't access network paths directly.
-    #[cfg( target_os = "windows" )]
-    fn copy_to_temp_and_get_url( source: &std::path::Path ) -> Option<String> {
-        use std::os::windows::fs::MetadataExt;
-
-        let temp_dir = std::env::temp_dir();
-        let oxidio_temp = temp_dir.join( "oxidio" );
-
-        tracing::debug!( "Attempting to copy album art from: {:?}", source );
-
-        // Create oxidio temp dir if it doesn't exist
-        if !oxidio_temp.exists() {
-            if let Err( e ) = std::fs::create_dir_all( &oxidio_temp ) {
-                tracing::warn!( "Failed to create temp dir {:?}: {}", oxidio_temp, e );
-                return None;
-            }
-        }
-
-        // Use a fixed filename so we overwrite the old cover each time
-        let ext = source.extension().and_then( |e| e.to_str() ).unwrap_or( "jpg" );
-        let dest_path = oxidio_temp.join( format!( "cover.{}", ext ) );
-
-        // Remove existing file first to avoid permission issues
-        if dest_path.exists() {
-            // Clear any read-only attribute before removing
-            if let Ok( metadata ) = std::fs::metadata( &dest_path ) {
-                let attrs = metadata.file_attributes();
-                // FILE_ATTRIBUTE_READONLY = 0x1
-                if attrs & 0x1 != 0 {
-                    let mut perms = metadata.permissions();
-                    perms.set_readonly( false );
-                    let _ = std::fs::set_permissions( &dest_path, perms );
-                }
-            }
-            if let Err( e ) = std::fs::remove_file( &dest_path ) {
-                tracing::warn!( "Failed to remove old cover file {:?}: {}", dest_path, e );
-            }
-        }
-
-        // Copy the file
-        match std::fs::copy( source, &dest_path ) {
-            Ok( bytes ) => {
-                tracing::debug!( "Copied {} bytes to {:?}", bytes, dest_path );
-            }
-            Err( e ) => {
-                tracing::warn!( "Failed to copy album art from {:?} to {:?}: {}", source, dest_path, e );
-                return None;
-            }
-        }
-
-        // Clear file attributes (hidden, archive, system, read-only) so SMTC can access it
+        // Detect track changes from the CommandProcessor (auto-advance)
         {
-            use std::os::windows::ffi::OsStrExt;
-            use windows::Win32::Storage::FileSystem::{ SetFileAttributesW, FILE_ATTRIBUTE_NORMAL };
-            use windows::core::PCWSTR;
+            let current_track = self.player.current_track();
+            let playlist_index = {
+                let playlist_arc = self.player.playlist();
+                let playlist = playlist_arc.read().unwrap();
+                playlist.current_index()
+            };
 
-            let wide_path: Vec<u16> = dest_path.as_os_str()
-                .encode_wide()
-                .chain( std::iter::once( 0 ) )
-                .collect();
-
-            unsafe {
-                if SetFileAttributesW( PCWSTR( wide_path.as_ptr() ), FILE_ATTRIBUTE_NORMAL ).is_err() {
-                    tracing::debug!( "Failed to clear file attributes on {:?}", dest_path );
+            // If the playing track changed (e.g. auto-advance by processor), scroll to it
+            if playlist_index.is_some() && self.player.state() == PlaybackState::Playing {
+                if current_track != self.last_track {
+                    self.scroll_to_playing = true;
                 }
             }
-        }
-
-        path_to_file_url( &dest_path )
-    }
-
-
-    /// Stub for non-Windows.
-    #[cfg( not( target_os = "windows" ) )]
-    fn copy_to_temp_and_get_url( _source: &std::path::Path ) -> Option<String> {
-        None
-    }
-
-
-    /// Stub for non-Windows platforms.
-    #[cfg( not( target_os = "windows" ) )]
-    fn update_media_controls( &mut self ) {
-        // Media controls not available on this platform
-    }
-
-
-    /// Updates Discord Rich Presence with current track info.
-    fn update_discord( &mut self ) {
-        // Check if Discord is enabled in settings
-        if !self.settings.discord_enabled {
-            if self.last_discord_track.is_some() {
-                self.discord.clear();
-                self.last_discord_track = None;
-            }
-            return;
-        }
-
-        let current_track = self.player.current_track();
-        let current_state = self.player.state();
-
-        // Clear presence if stopped or paused
-        if current_state != PlaybackState::Playing {
-            if self.last_discord_track.is_some() {
-                self.discord.clear();
-                self.last_discord_track = None;
-            }
-            return;
-        }
-
-        // Update if track changed
-        if self.last_discord_track != current_track {
-            if let Some( ref track_path ) = current_track {
-                let metadata = self.player.metadata();
-
-                let title = metadata.as_ref()
-                    .and_then( |m| m.title.clone() )
-                    .or_else( || {
-                        track_path.file_stem()
-                            .map( |n| n.to_string_lossy().to_string() )
-                    });
-
-                let artist = metadata.as_ref().and_then( |m| m.artist.clone() );
-                let album = metadata.as_ref().and_then( |m| m.album.clone() );
-
-                self.discord.update(
-                    title.as_deref(),
-                    artist.as_deref(),
-                    album.as_deref(),
-                );
-            }
-            self.last_discord_track = current_track;
+            self.last_track = current_track;
         }
     }
 
@@ -704,11 +348,8 @@ impl App {
             KeyCode::Char( ' ' ) => {
                 // Toggle play/pause
                 match self.player.state() {
-                    PlaybackState::Playing => {
-                        let _ = self.player.pause();
-                    }
-                    PlaybackState::Paused => {
-                        let _ = self.player.resume();
+                    PlaybackState::Playing | PlaybackState::Paused => {
+                        self.send_command( AppCommand::TogglePlayback );
                     }
                     PlaybackState::Stopped => {
                         // Start playing selected track
@@ -717,7 +358,7 @@ impl App {
                 }
             }
             KeyCode::Char( 's' ) if !self.edit_mode => {
-                let _ = self.player.stop();
+                self.send_command( AppCommand::Stop );
             }
             KeyCode::Char( 'e' ) => {
                 self.edit_mode = !self.edit_mode;
@@ -758,9 +399,7 @@ impl App {
                 let new_pos = pos + Duration::from_secs( 10 );
                 if let Some( duration ) = self.player.duration() {
                     if new_pos < duration {
-                        if let Err( e ) = self.player.seek( new_pos ) {
-                            self.set_status( format!( "Seek error: {}", e ) );
-                        }
+                        self.send_command( AppCommand::Seek { position_secs: new_pos.as_secs_f64() } );
                     }
                 }
             }
@@ -768,9 +407,7 @@ impl App {
                 // Seek backward 10 seconds
                 let pos = self.player.position();
                 let new_pos = pos.saturating_sub( Duration::from_secs( 10 ) );
-                if let Err( e ) = self.player.seek( new_pos ) {
-                    self.set_status( format!( "Seek error: {}", e ) );
-                }
+                self.send_command( AppCommand::Seek { position_secs: new_pos.as_secs_f64() } );
             }
             KeyCode::Right => {
                 self.play_next();
@@ -779,31 +416,29 @@ impl App {
                 self.play_previous();
             }
             KeyCode::Char( 'c' ) => {
-                let playlist_arc = self.player.playlist();
-                let mut playlist = playlist_arc.write().unwrap();
-                playlist.clear();
+                self.send_command( AppCommand::ClearPlaylist );
                 self.set_status( "Playlist cleared" );
             }
             KeyCode::Char( 'r' ) => {
                 // Cycle repeat mode
                 let playlist_arc = self.player.playlist();
-                let mut playlist = playlist_arc.write().unwrap();
+                let playlist = playlist_arc.read().unwrap();
                 let new_mode = match playlist.repeat() {
                     RepeatMode::Off => RepeatMode::One,
                     RepeatMode::One => RepeatMode::All,
                     RepeatMode::All => RepeatMode::Off,
                 };
-                playlist.set_repeat( new_mode );
                 drop( playlist );
+                self.send_command( AppCommand::CycleRepeat );
                 self.set_status( format!( "Repeat: {:?}", new_mode ) );
             }
             KeyCode::Char( 'S' ) => {
                 // Toggle shuffle
                 let playlist_arc = self.player.playlist();
-                let mut playlist = playlist_arc.write().unwrap();
+                let playlist = playlist_arc.read().unwrap();
                 let new_shuffle = !playlist.shuffle();
-                playlist.set_shuffle( new_shuffle );
                 drop( playlist );
+                self.send_command( AppCommand::ToggleShuffle );
                 self.set_status( format!( "Shuffle: {}", if new_shuffle { "on" } else { "off" } ) );
             }
             KeyCode::Char( 'v' ) => {
@@ -814,13 +449,13 @@ impl App {
             KeyCode::Char( '+' ) | KeyCode::Char( '=' ) => {
                 // Volume up
                 self.volume = ( self.volume + 0.05 ).min( 1.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( '-' ) | KeyCode::Char( '_' ) => {
                 // Volume down
                 self.volume = ( self.volume - 0.05 ).max( 0.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( 'm' ) => {
@@ -832,7 +467,7 @@ impl App {
                     self.volume = 1.0;
                     self.set_status( "Volume: 100%" );
                 }
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
             }
             KeyCode::Char( 'i' ) => {
                 // Show track info
@@ -867,9 +502,7 @@ impl App {
             KeyCode::Enter | KeyCode::Char( 'l' ) => {
                 if let Ok( Some( file_path ) ) = self.browser.enter_selected() {
                     // Add file to playlist
-                    let playlist_arc = self.player.playlist();
-                    let mut playlist = playlist_arc.write().unwrap();
-                    playlist.add( file_path );
+                    self.send_command( AppCommand::AddPath { path: file_path.to_string_lossy().to_string() } );
                     self.set_status( "Added to playlist" );
                 }
             }
@@ -884,19 +517,10 @@ impl App {
                     let is_audio = entry.is_audio;
 
                     if is_dir && entry.name != ".." {
-                        let mut scanner = LibraryScanner::new();
-                        scanner.add_root( path );
-                        if let Ok( tracks ) = scanner.scan() {
-                            let count = tracks.len();
-                            let playlist_arc = self.player.playlist();
-                            let mut playlist = playlist_arc.write().unwrap();
-                            playlist.add_many( tracks.into_iter().map( |t| t.path ) );
-                            self.set_status( format!( "Added {} tracks", count ) );
-                        }
+                        self.send_command( AppCommand::AddPath { path: path.to_string_lossy().to_string() } );
+                        self.set_status( "Adding to playlist..." );
                     } else if is_audio {
-                        let playlist_arc = self.player.playlist();
-                        let mut playlist = playlist_arc.write().unwrap();
-                        playlist.add( path );
+                        self.send_command( AppCommand::AddPath { path: path.to_string_lossy().to_string() } );
                         self.set_status( "Added to playlist" );
                     }
                 }
@@ -918,11 +542,7 @@ impl App {
             }
             // Playback controls
             KeyCode::Char( ' ' ) => {
-                match self.player.state() {
-                    PlaybackState::Playing => { let _ = self.player.pause(); }
-                    PlaybackState::Paused => { let _ = self.player.resume(); }
-                    PlaybackState::Stopped => { self.play_selected(); }
-                }
+                self.send_command( AppCommand::TogglePlayback );
             }
             KeyCode::Char( 'n' ) => self.play_next(),
             KeyCode::Char( 'p' ) => self.play_previous(),
@@ -930,12 +550,12 @@ impl App {
             KeyCode::Right => self.play_next(),
             KeyCode::Char( '+' ) | KeyCode::Char( '=' ) => {
                 self.volume = ( self.volume + 0.05 ).min( 1.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( '-' ) | KeyCode::Char( '_' ) => {
                 self.volume = ( self.volume - 0.05 ).max( 0.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( 'm' ) => {
@@ -946,7 +566,7 @@ impl App {
                     self.volume = 1.0;
                     self.set_status( "Volume: 100%" );
                 }
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
             }
             _ => {}
         }
@@ -989,11 +609,7 @@ impl App {
             }
             // Playback controls
             KeyCode::Char( ' ' ) => {
-                match self.player.state() {
-                    PlaybackState::Playing => { let _ = self.player.pause(); }
-                    PlaybackState::Paused => { let _ = self.player.resume(); }
-                    PlaybackState::Stopped => { self.play_selected(); }
-                }
+                self.send_command( AppCommand::TogglePlayback );
             }
             KeyCode::Char( 'n' ) => self.play_next(),
             KeyCode::Char( 'p' ) => self.play_previous(),
@@ -1002,25 +618,25 @@ impl App {
                 let new_pos = pos + Duration::from_secs( 10 );
                 if let Some( duration ) = self.player.duration() {
                     if new_pos < duration {
-                        let _ = self.player.seek( new_pos );
+                        self.send_command( AppCommand::Seek { position_secs: new_pos.as_secs_f64() } );
                     }
                 }
             }
             KeyCode::Left if modifiers.contains( KeyModifiers::CONTROL ) => {
                 let pos = self.player.position();
                 let new_pos = pos.saturating_sub( Duration::from_secs( 10 ) );
-                let _ = self.player.seek( new_pos );
+                self.send_command( AppCommand::Seek { position_secs: new_pos.as_secs_f64() } );
             }
             KeyCode::Right => self.play_next(),
             KeyCode::Left => self.play_previous(),
             KeyCode::Char( '+' ) | KeyCode::Char( '=' ) => {
                 self.volume = ( self.volume + 0.05 ).min( 1.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( '-' ) | KeyCode::Char( '_' ) => {
                 self.volume = ( self.volume - 0.05 ).max( 0.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( 'm' ) => {
@@ -1031,7 +647,7 @@ impl App {
                     self.volume = 1.0;
                     self.set_status( "Volume: 100%" );
                 }
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
             }
             _ => {}
         }
@@ -1053,11 +669,7 @@ impl App {
             }
             // Playback controls
             KeyCode::Char( ' ' ) => {
-                match self.player.state() {
-                    PlaybackState::Playing => { let _ = self.player.pause(); }
-                    PlaybackState::Paused => { let _ = self.player.resume(); }
-                    PlaybackState::Stopped => { self.play_selected(); }
-                }
+                self.send_command( AppCommand::TogglePlayback );
             }
             KeyCode::Char( 'n' ) => self.play_next(),
             KeyCode::Char( 'p' ) => self.play_previous(),
@@ -1066,25 +678,25 @@ impl App {
                 let new_pos = pos + Duration::from_secs( 10 );
                 if let Some( duration ) = self.player.duration() {
                     if new_pos < duration {
-                        let _ = self.player.seek( new_pos );
+                        self.send_command( AppCommand::Seek { position_secs: new_pos.as_secs_f64() } );
                     }
                 }
             }
             KeyCode::Left if modifiers.contains( KeyModifiers::CONTROL ) => {
                 let pos = self.player.position();
                 let new_pos = pos.saturating_sub( Duration::from_secs( 10 ) );
-                let _ = self.player.seek( new_pos );
+                self.send_command( AppCommand::Seek { position_secs: new_pos.as_secs_f64() } );
             }
             KeyCode::Right => self.play_next(),
             KeyCode::Left => self.play_previous(),
             KeyCode::Char( '+' ) | KeyCode::Char( '=' ) => {
                 self.volume = ( self.volume + 0.05 ).min( 1.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( '-' ) | KeyCode::Char( '_' ) => {
                 self.volume = ( self.volume - 0.05 ).max( 0.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( 'm' ) => {
@@ -1095,7 +707,7 @@ impl App {
                     self.volume = 1.0;
                     self.set_status( "Volume: 100%" );
                 }
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
             }
             _ => {}
         }
@@ -1104,7 +716,7 @@ impl App {
 
     fn handle_settings_key( &mut self, code: KeyCode ) {
         // Number of settings items
-        const SETTINGS_COUNT: usize = 2;
+        const SETTINGS_COUNT: usize = 3;
 
         match code {
             KeyCode::Char( 'q' ) => {
@@ -1124,41 +736,33 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                // Toggle the selected setting
+                // Toggle the selected setting (sends command to processor;
+                // integrations worker handles the actual enable/disable)
                 match self.settings_selected {
                     0 => {
+                        self.send_command( AppCommand::ToggleSetting { key: "discord_enabled".to_string() } );
                         self.settings.discord_enabled = !self.settings.discord_enabled;
-                        if !self.settings.discord_enabled {
-                            self.discord.clear();
-                            self.last_discord_track = None;
-                        }
                     }
                     1 => {
+                        self.send_command( AppCommand::ToggleSetting { key: "smtc_enabled".to_string() } );
                         self.settings.smtc_enabled = !self.settings.smtc_enabled;
-                        if !self.settings.smtc_enabled {
-                            // Drop media controls entirely to clear SMTC
-                            self.media_controls = None;
-                            self.last_smtc_state = None;
-                            self.last_smtc_track = None;
+                    }
+                    2 => {
+                        // Web toggle — skip if locked by CLI args
+                        if self.cli_web_override.is_none() {
+                            self.send_command( AppCommand::ToggleSetting { key: "web_enabled".to_string() } );
+                            self.settings.web_enabled = !self.settings.web_enabled;
+                            self.set_status( "Web setting saved. Restart oxidio to apply." );
                         } else {
-                            // Recreate media controls when re-enabled
-                            let ( tx, rx ) = create_media_controls_channel();
-                            self.media_controls = MediaControlsHandler::new( tx );
-                            self.media_controls_rx = rx;
-                            self.force_smtc_update = true;
+                            self.set_status( "Web interface is locked by CLI args" );
                         }
                     }
                     _ => {}
                 }
-                self.settings.save();
             }
             // Playback controls
             KeyCode::Char( ' ' ) => {
-                match self.player.state() {
-                    PlaybackState::Playing => { let _ = self.player.pause(); }
-                    PlaybackState::Paused => { let _ = self.player.resume(); }
-                    PlaybackState::Stopped => { self.play_selected(); }
-                }
+                self.send_command( AppCommand::TogglePlayback );
             }
             KeyCode::Char( 'n' ) => self.play_next(),
             KeyCode::Char( 'p' ) => self.play_previous(),
@@ -1166,12 +770,12 @@ impl App {
             KeyCode::Right => self.play_next(),
             KeyCode::Char( '+' ) | KeyCode::Char( '=' ) => {
                 self.volume = ( self.volume + 0.05 ).min( 1.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( '-' ) | KeyCode::Char( '_' ) => {
                 self.volume = ( self.volume - 0.05 ).max( 0.0 );
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
                 self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
             }
             KeyCode::Char( 'm' ) => {
@@ -1182,7 +786,7 @@ impl App {
                     self.volume = 1.0;
                     self.set_status( "Volume: 100%" );
                 }
-                self.player.set_volume( self.volume );
+                self.send_command( AppCommand::SetVolume { level: self.volume } );
             }
             _ => {}
         }
@@ -1270,73 +874,42 @@ impl App {
     fn run_command( &mut self, cmd: Command ) -> Result<()> {
         match cmd {
             Command::Add { path } => {
-                if path.is_dir() {
-                    let mut scanner = LibraryScanner::new();
-                    scanner.add_root( path );
-                    let tracks = scanner.scan()?;
-                    let count = tracks.len();
-                    let playlist_arc = self.player.playlist();
-                    let mut playlist = playlist_arc.write().unwrap();
-                    playlist.add_many( tracks.into_iter().map( |t| t.path ) );
-                    self.set_status( format!( "Added {} tracks", count ) );
-                } else {
-                    let playlist_arc = self.player.playlist();
-                    let mut playlist = playlist_arc.write().unwrap();
-                    playlist.add( path );
-                    self.set_status( "Added to playlist" );
-                }
+                self.send_command( AppCommand::AddPath { path: path.to_string_lossy().to_string() } );
+                self.set_status( "Adding to playlist..." );
             }
             Command::Remove => {
                 self.delete_selected_track();
             }
             Command::Clear => {
-                let playlist_arc = self.player.playlist();
-                let mut playlist = playlist_arc.write().unwrap();
-                playlist.clear();
+                self.send_command( AppCommand::ClearPlaylist );
                 self.set_status( "Playlist cleared" );
             }
             Command::Dedup => {
-                let playlist_arc = self.player.playlist();
-                let mut playlist = playlist_arc.write().unwrap();
-                let removed = playlist.dedup();
-                if removed > 0 {
-                    self.set_status( format!( "Removed {} duplicate(s)", removed ) );
-                } else {
-                    self.set_status( "No duplicates found" );
-                }
+                self.send_command( AppCommand::Dedup );
+                self.set_status( "Deduplicating..." );
             }
             Command::Shuffle => {
-                let playlist_arc = self.player.playlist();
-                let mut playlist = playlist_arc.write().unwrap();
-                let new_shuffle = !playlist.shuffle();
-                playlist.set_shuffle( new_shuffle );
-                self.set_status( format!( "Shuffle: {}", if new_shuffle { "on" } else { "off" } ) );
+                self.send_command( AppCommand::ToggleShuffle );
+                self.set_status( "Shuffle toggled" );
             }
             Command::Repeat { mode } => {
-                let playlist_arc = self.player.playlist();
-                let mut playlist = playlist_arc.write().unwrap();
-                let new_mode = match mode {
-                    Some( RepeatModeArg::Off ) => RepeatMode::Off,
-                    Some( RepeatModeArg::One ) => RepeatMode::One,
-                    Some( RepeatModeArg::All ) => RepeatMode::All,
-                    None => match playlist.repeat() {
-                        RepeatMode::Off => RepeatMode::One,
-                        RepeatMode::One => RepeatMode::All,
-                        RepeatMode::All => RepeatMode::Off,
-                    },
+                match mode {
+                    Some( RepeatModeArg::Off ) => self.send_command( AppCommand::SetRepeat { mode: oxidio_protocol::RepeatModeValue::Off } ),
+                    Some( RepeatModeArg::One ) => self.send_command( AppCommand::SetRepeat { mode: oxidio_protocol::RepeatModeValue::One } ),
+                    Some( RepeatModeArg::All ) => self.send_command( AppCommand::SetRepeat { mode: oxidio_protocol::RepeatModeValue::All } ),
+                    None => self.send_command( AppCommand::CycleRepeat ),
                 };
-                playlist.set_repeat( new_mode );
-                self.set_status( format!( "Repeat: {:?}", new_mode ) );
+                self.set_status( "Repeat mode changed" );
             }
             Command::Play => {
                 self.play_selected();
             }
             Command::Pause => {
-                self.player.pause()?;
+                self.send_command( AppCommand::Pause );
                 self.set_status( "Paused" );
             }
             Command::Stop => {
-                self.player.stop()?;
+                self.send_command( AppCommand::Stop );
                 self.set_status( "Stopped" );
             }
             Command::Next => {
@@ -1366,42 +939,22 @@ impl App {
                 self.should_quit = true;
             }
             Command::Save { name } => {
-                if let Some( dir ) = oxidio_core::Playlist::ensure_playlist_dir() {
-                    let path = dir.join( format!( "{}.m3u", name ) );
-                    let playlist_arc = self.player.playlist();
-                    let playlist = playlist_arc.read().unwrap();
-                    match playlist.save( &path ) {
-                        Ok(()) => self.set_status( format!( "Saved playlist to {}", path.display() ) ),
-                        Err( e ) => self.set_status( format!( "Failed to save: {}", e ) ),
-                    }
-                } else {
-                    self.set_status( "Could not determine playlist directory".to_string() );
-                }
+                self.send_command( AppCommand::SavePlaylist { name } );
+                self.set_status( "Saving playlist..." );
             }
             Command::Load { name } => {
-                if let Some( dir ) = oxidio_core::Playlist::playlist_dir() {
-                    let path = dir.join( format!( "{}.m3u", name ) );
-                    match oxidio_core::Playlist::load( &path ) {
-                        Ok( loaded ) => {
-                            let playlist_arc = self.player.playlist();
-                            let mut playlist = playlist_arc.write().unwrap();
-                            *playlist = loaded;
-                            self.set_status( format!( "Loaded playlist from {}", path.display() ) );
-                        }
-                        Err( e ) => self.set_status( format!( "Failed to load: {}", e ) ),
-                    }
-                } else {
-                    self.set_status( "Could not determine playlist directory".to_string() );
-                }
+                self.send_command( AppCommand::LoadPlaylist { name } );
+                self.set_status( "Loading playlist..." );
+            }
+            Command::ListPlaylists => {
+                self.send_command( AppCommand::ListPlaylists );
+            }
+            Command::DeletePlaylist { name } => {
+                self.send_command( AppCommand::DeletePlaylist { name } );
             }
             Command::Seek { position } => {
-                match self.player.seek( position ) {
-                    Ok(()) => {
-                        let secs = position.as_secs();
-                        self.set_status( format!( "Seeked to {}:{:02}", secs / 60, secs % 60 ) );
-                    }
-                    Err( e ) => self.set_status( format!( "Seek error: {}", e ) ),
-                }
+                self.send_command( AppCommand::Seek { position_secs: position.as_secs_f64() } );
+                self.set_status( format!( "Seeking to {}:{:02}", position.as_secs() / 60, position.as_secs() % 60 ) );
             }
             Command::Vis => {
                 self.visualizer_style = self.visualizer_style.next();
@@ -1410,7 +963,7 @@ impl App {
             Command::Volume { level } => {
                 if let Some( level ) = level {
                     self.volume = ( level as f32 / 100.0 ).clamp( 0.0, 1.0 );
-                    self.player.set_volume( self.volume );
+                    self.send_command( AppCommand::SetVolume { level: self.volume } );
                     self.set_status( format!( "Volume: {}%", level.min( 100 ) ) );
                 } else {
                     self.set_status( format!( "Volume: {}%", ( self.volume * 100.0 ) as i32 ) );
@@ -1461,58 +1014,26 @@ impl App {
 
     fn play_selected( &mut self ) {
         if let Some( idx ) = self.playlist_state.selected() {
-            let playlist = self.player.playlist();
-            let mut playlist = playlist.write().unwrap();
-            if let Some( path ) = playlist.jump_to( idx ) {
-                let path = path.clone();
-                drop( playlist );
-                if let Err( e ) = self.player.play( path ) {
-                    self.set_status( format!( "Play error: {}", e ) );
-                } else {
-                    self.force_smtc_update = true;
-                }
-            }
+            self.send_command( AppCommand::PlayTrack { index: idx } );
         }
     }
 
 
     fn play_next( &mut self ) {
-        let playlist = self.player.playlist();
-        let mut playlist = playlist.write().unwrap();
-        if let Some( path ) = playlist.next() {
-            let path = path.clone();
-            drop( playlist );
-            if let Err( e ) = self.player.play( path ) {
-                self.set_status( format!( "Play error: {}", e ) );
-            } else {
-                self.force_smtc_update = true;
-            }
-        }
+        self.send_command( AppCommand::Next );
     }
 
 
     fn play_previous( &mut self ) {
-        let playlist = self.player.playlist();
-        let mut playlist = playlist.write().unwrap();
-        if let Some( path ) = playlist.previous() {
-            let path = path.clone();
-            drop( playlist );
-            if let Err( e ) = self.player.play( path ) {
-                self.set_status( format!( "Play error: {}", e ) );
-            } else {
-                self.force_smtc_update = true;
-            }
-        }
+        self.send_command( AppCommand::Previous );
     }
 
 
     fn move_track_down( &mut self ) {
         if let Some( idx ) = self.playlist_state.selected() {
-            let playlist = self.player.playlist();
-            let mut playlist = playlist.write().unwrap();
-            if idx < playlist.len().saturating_sub( 1 ) {
-                playlist.move_track( idx, idx + 1 );
-                drop( playlist );
+            let len = self.player.playlist().read().unwrap().len();
+            if idx < len.saturating_sub( 1 ) {
+                self.send_command( AppCommand::MoveTrack { from: idx, to: idx + 1 } );
                 self.playlist_state.select( Some( idx + 1 ) );
             }
         }
@@ -1522,10 +1043,7 @@ impl App {
     fn move_track_up( &mut self ) {
         if let Some( idx ) = self.playlist_state.selected() {
             if idx > 0 {
-                let playlist = self.player.playlist();
-                let mut playlist = playlist.write().unwrap();
-                playlist.move_track( idx, idx - 1 );
-                drop( playlist );
+                self.send_command( AppCommand::MoveTrack { from: idx, to: idx - 1 } );
                 self.playlist_state.select( Some( idx - 1 ) );
             }
         }
@@ -1534,16 +1052,14 @@ impl App {
 
     fn delete_selected_track( &mut self ) {
         if let Some( idx ) = self.playlist_state.selected() {
-            let playlist = self.player.playlist();
-            let mut playlist = playlist.write().unwrap();
-            playlist.remove( idx );
-            let len = playlist.len();
-            drop( playlist );
-
-            if len == 0 {
+            let len = self.player.playlist().read().unwrap().len();
+            self.send_command( AppCommand::RemoveTrack { index: idx } );
+            // Adjust selection for the removed item
+            let new_len = len.saturating_sub( 1 );
+            if new_len == 0 {
                 self.playlist_state.select( None );
-            } else if idx >= len {
-                self.playlist_state.select( Some( len - 1 ) );
+            } else if idx >= new_len {
+                self.playlist_state.select( Some( new_len - 1 ) );
             }
             self.set_status( "Track removed" );
         }
@@ -1587,6 +1103,168 @@ impl App {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Create the shared player
+    let player = Arc::new( Player::new()? );
+
+    // Load initial playlist from CLI files or last session
+    if !args.files.is_empty() {
+        let playlist_arc = player.playlist();
+        let mut playlist = playlist_arc.write().unwrap();
+        for file in &args.files {
+            if file.is_dir() {
+                let mut scanner = LibraryScanner::new();
+                scanner.add_root( file.clone() );
+                if let Ok( tracks ) = scanner.scan() {
+                    playlist.add_many( tracks.into_iter().map( |t| t.path ) );
+                }
+            } else {
+                playlist.add( file.clone() );
+            }
+        }
+    } else {
+        // Try to load last session
+        if let Some( session ) = oxidio_core::Playlist::load_session() {
+            if let Some( dir ) = oxidio_core::Playlist::playlist_dir() {
+                let path = dir.join( format!( "{}.m3u", session.playlist_name ) );
+                if let Ok( loaded ) = oxidio_core::Playlist::load( &path ) {
+                    let playlist_arc = player.playlist();
+                    let mut playlist = playlist_arc.write().unwrap();
+                    *playlist = loaded;
+                    playlist.set_shuffle( session.shuffle );
+                    playlist.set_repeat( session.repeat );
+                    if let Some( idx ) = session.track_index {
+                        playlist.jump_to( idx );
+                    }
+                    player.set_volume( session.volume );
+                    tracing::info!(
+                        "Restored session: {}, track {}, shuffle={}, repeat={:?}, volume={}",
+                        session.playlist_name,
+                        session.track_index.unwrap_or( 0 ),
+                        session.shuffle,
+                        session.repeat,
+                        session.volume
+                    );
+                }
+            }
+        }
+    }
+
+    // Determine starting directory for the processor's browser
+    let start_path = args.path.clone()
+        .or_else( || dirs::home_dir() )
+        .unwrap_or_else( || PathBuf::from( "." ) );
+
+    // Create control channel
+    let mut channel = ControlChannel::new();
+    let command_sender = channel.sender();
+    let command_rx = channel.take_command_rx().expect( "Command receiver already taken" );
+    let broadcast_tx = channel.broadcast_tx();
+
+    // Load processor settings and create command processor
+    let proc_settings = ProcessorSettings::load();
+    let settings_web_enabled = proc_settings.web_enabled;
+    let integrations_discord = proc_settings.discord_enabled;
+    let integrations_smtc = proc_settings.smtc_enabled;
+    let processor_player = Arc::clone( &player );
+    let browse = args.browse;
+    let mut processor = CommandProcessor::new(
+        processor_player,
+        proc_settings,
+        start_path,
+        browse,
+        command_rx,
+        broadcast_tx,
+    );
+
+    // Spawn command processor on a background thread with its own tokio runtime
+    let web_sender = channel.sender();
+    let web_broadcast_tx = channel.broadcast_tx();
+    let web_enabled = args.resolve_web_enabled( settings_web_enabled );
+    let web_bind = args.web_bind.clone();
+    let web_port = args.web_port;
+
+    std::thread::Builder::new()
+        .name( "oxidio-processor".to_string() )
+        .spawn( move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect( "Failed to create tokio runtime for command processor" );
+            rt.block_on( processor.run() );
+        })
+        .expect( "Failed to spawn command processor thread" );
+
+    // Spawn web server if enabled
+    #[cfg( feature = "web" )]
+    let _web_handle = if web_enabled {
+        let handle = std::thread::Builder::new()
+            .name( "oxidio-web".to_string() )
+            .spawn( move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect( "Failed to create tokio runtime for web server" );
+                rt.block_on( async {
+                    match oxidio_web::start_web_server(
+                        &web_bind, web_port, web_sender, web_broadcast_tx,
+                    ).await {
+                        Ok( handle ) => {
+                            tracing::info!( "Web server started on http://{}:{}", web_bind, web_port );
+                            // Keep the runtime alive while the server runs
+                            // The handle will be dropped when this thread exits
+                            std::future::pending::<()>().await;
+                            drop( handle );
+                        }
+                        Err( e ) => {
+                            tracing::error!( "Failed to start web server: {}", e );
+                        }
+                    }
+                });
+            })
+            .ok();
+        handle
+    } else {
+        None
+    };
+
+    // Spawn integrations worker (Discord Rich Presence + SMTC)
+    // Runs on its own thread so these work in both TUI and daemon modes
+    {
+        let integrations_player = Arc::clone( &player );
+        let integrations_sender = channel.sender();
+        let integrations_rx = channel.subscribe();
+        let integrations_settings = ProcessorSettings {
+            discord_enabled: integrations_discord,
+            smtc_enabled: integrations_smtc,
+            web_enabled: settings_web_enabled,
+            ..ProcessorSettings::default()
+        };
+        std::thread::Builder::new()
+            .name( "oxidio-integrations".to_string() )
+            .spawn( move || {
+                integrations::run_integrations(
+                    integrations_player,
+                    integrations_sender,
+                    integrations_rx,
+                    &integrations_settings,
+                );
+            })
+            .expect( "Failed to spawn integrations thread" );
+    }
+
+    // Branch: daemon mode (headless) vs TUI mode
+    if args.daemon {
+        tracing::info!( "Running in daemon mode (headless). Press Ctrl+C to stop." );
+
+        // Block until the process is killed
+        // Future: this is where IPC socket listening for CLI oneshots will go
+        loop {
+            std::thread::sleep( Duration::from_secs( 1 ) );
+        }
+    }
+
+    // --- TUI mode ---
+
     // Setup terminal
     enable_raw_mode()?;
     io::stdout().execute( EnterAlternateScreen )?;
@@ -1594,8 +1272,9 @@ fn main() -> Result<()> {
 
     let mut terminal = Terminal::new( CrosstermBackend::new( io::stdout() ) )?;
 
-    // Create app
-    let mut app = App::new( &args )?;
+    // Create TUI app (reads initial state from the shared player)
+    let state_rx = channel.subscribe();
+    let mut app = App::new( player, command_sender, state_rx, &args )?;
 
     // Main loop
     loop {
@@ -2302,20 +1981,54 @@ fn draw_vis_level_meter( lines: &mut Vec<Line<'static>>, data: &[f32; 32], heigh
 
 
 fn draw_settings( frame: &mut Frame, app: &App, area: Rect ) {
-    let settings_items = vec![
-        ( "Discord Rich Presence", app.settings.discord_enabled ),
-        ( "System Media Controls (SMTC)", app.settings.smtc_enabled ),
+    let web_locked = app.cli_web_override.is_some();
+    let web_enabled = if let Some( locked ) = app.cli_web_override {
+        locked
+    } else {
+        app.settings.web_enabled
+    };
+
+    // Build settings entries: ( name, enabled, locked )
+    let settings_items: Vec<( &str, bool, bool )> = vec![
+        ( "Discord Rich Presence", app.settings.discord_enabled, false ),
+        ( "System Media Controls (SMTC)", app.settings.smtc_enabled, false ),
+        ( "Web Interface", web_enabled, web_locked ),
     ];
 
-    let items: Vec<ListItem> = settings_items.iter().enumerate().map( |( idx, ( name, enabled ) )| {
-        let checkbox = if *enabled { "[x]" } else { "[ ]" };
-        let style = if idx == app.settings_selected {
+    let items: Vec<ListItem> = settings_items.iter().enumerate().map( |( idx, ( name, enabled, locked ) )| {
+        let checkbox = if *locked {
+            if *enabled { "[-]" } else { "[-]" }
+        } else if *enabled {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+
+        let label = if *locked {
+            format!( " {} {} (locked by CLI)", checkbox, name )
+        } else if idx == 2 {
+            if *enabled {
+                format!( " {} {} (port {}, restart to apply changes)", checkbox, name, app.settings.web_port )
+            } else {
+                format!( " {} {} (restart to apply changes)", checkbox, name )
+            }
+        } else {
+            format!( " {} {}", checkbox, name )
+        };
+
+        let style = if *locked {
+            if idx == app.settings_selected {
+                Style::default().fg( Color::DarkGray ).bold()
+            } else {
+                Style::default().fg( Color::DarkGray )
+            }
+        } else if idx == app.settings_selected {
             Style::default().fg( Color::Yellow ).bold()
         } else {
             Style::default().fg( Color::White )
         };
 
-        ListItem::new( format!( " {} {}", checkbox, name ) ).style( style )
+        ListItem::new( label ).style( style )
     }).collect();
 
     let list = List::new( items )
