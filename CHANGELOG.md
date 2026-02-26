@@ -1,3 +1,10 @@
+# [1.1.0-RC.2](https://github.com/pcnate/oxidio/compare/v1.1.0-RC.1...v1.1.0-RC.2) (2026-02-26)
+
+
+### Bug Fixes
+
+* Use workspace deps; update release; fix icon ([d3f9236](https://github.com/pcnate/oxidio/commit/d3f92362d9e2c90259c68b544b2a216b3928b842))
+
 # [1.1.0-RC.1](https://github.com/pcnate/oxidio/compare/v1.0.0...v1.1.0-RC.1) (2026-02-26)
 
 

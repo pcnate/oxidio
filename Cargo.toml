@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.1.0-RC.1"
+version = "1.1.0-RC.2"
 edition = "2021"
 license = "MIT"
 authors = ["Nathan Baker"]
@@ -46,7 +46,7 @@ futures-util = "0.3"
 serde_json = "1.0"
 
 # Internal
-oxidio-core = { path = "crates/oxidio-core", version = "1.0.0" }
-oxidio-protocol = { path = "crates/oxidio-protocol", version = "1.0.0" }
-oxidio-ctl = { path = "crates/oxidio-ctl", version = "1.0.0" }
-oxidio-web = { path = "crates/oxidio-web", version = "1.0.0" }
+oxidio-core = { path = "crates/oxidio-core", version = "1.1.0-RC.2" }
+oxidio-protocol = { path = "crates/oxidio-protocol", version = "1.1.0-RC.2" }
+oxidio-ctl = { path = "crates/oxidio-ctl", version = "1.1.0-RC.2" }
+oxidio-web = { path = "crates/oxidio-web", version = "1.1.0-RC.2" }
