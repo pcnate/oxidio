@@ -209,7 +209,7 @@ impl Command {
                 Ok( Command::Volume { level } )
             }
             "help" | "h" => Ok( Command::Help ),
-            "quit" | "q" | "exit" => Ok( Command::Quit ),
+            "quit" | "exit" => Ok( Command::Quit ),
 
             "" => Err( CommandError::Unknown( "empty command".into() ) ),
             other => Err( CommandError::Unknown( other.to_string() ) ),
@@ -307,6 +307,234 @@ Other Commands:
 }
 
 
+/// A command definition for the suggestion engine.
+struct CommandDef {
+    /// The canonical command name.
+    name: &'static str,
+
+    /// Argument hint (e.g. "<path>", "[off|one|all]"). Empty if no args.
+    hint: &'static str,
+
+    /// Subcommands, if any.
+    subs: &'static [CommandDef],
+}
+
+
+/// Subcommand definitions for /playlist.
+const PLAYLIST_SUBS: &[CommandDef] = &[
+    CommandDef { name: "delete", hint: "<name>", subs: &[] },
+    CommandDef { name: "list", hint: "", subs: &[] },
+    CommandDef { name: "load", hint: "<name>", subs: &[] },
+    CommandDef { name: "save", hint: "<name>", subs: &[] },
+];
+
+
+/// Subcommand definitions for /queue.
+const QUEUE_SUBS: &[CommandDef] = &[
+    CommandDef { name: "add", hint: "<path>", subs: &[] },
+    CommandDef { name: "clear", hint: "", subs: &[] },
+    CommandDef { name: "dedup", hint: "", subs: &[] },
+    CommandDef { name: "remove", hint: "", subs: &[] },
+];
+
+
+/// All top-level command definitions, sorted alphabetically.
+const COMMAND_DEFS: &[CommandDef] = &[
+    CommandDef { name: "goto", hint: "<path>", subs: &[] },
+    CommandDef { name: "help", hint: "", subs: &[] },
+    CommandDef { name: "home", hint: "", subs: &[] },
+    CommandDef { name: "next", hint: "", subs: &[] },
+    CommandDef { name: "pause", hint: "", subs: &[] },
+    CommandDef { name: "play", hint: "", subs: &[] },
+    CommandDef { name: "playlist", hint: "", subs: PLAYLIST_SUBS },
+    CommandDef { name: "prev", hint: "", subs: &[] },
+    CommandDef { name: "queue", hint: "", subs: QUEUE_SUBS },
+    CommandDef { name: "quit", hint: "", subs: &[] },
+    CommandDef { name: "repeat", hint: "[off|one|all]", subs: &[] },
+    CommandDef { name: "search", hint: "<term>", subs: &[] },
+    CommandDef { name: "seek", hint: "<time>", subs: &[] },
+    CommandDef { name: "shuffle", hint: "", subs: &[] },
+    CommandDef { name: "stop", hint: "", subs: &[] },
+    CommandDef { name: "vis", hint: "", subs: &[] },
+    CommandDef { name: "vol", hint: "[0-100]", subs: &[] },
+];
+
+
+/// Builds a full hint string for a command definition.
+///
+/// Returns the first subcommand with its hint, or just the hint text.
+fn build_def_hint( def: &CommandDef ) -> String {
+    if !def.subs.is_empty() {
+        let sub = &def.subs[0];
+        if sub.hint.is_empty() {
+            sub.name.to_string()
+        } else {
+            format!( "{} {}", sub.name, sub.hint )
+        }
+    } else {
+        def.hint.to_string()
+    }
+}
+
+
+/// Returns ghost text suggestion for the given command input.
+///
+/// The input should NOT include the leading `/`. Returns the text that
+/// should be displayed after the cursor as dim/ghost text. The suggestion
+/// follows fish-shell style: shows the best alphabetical match for the
+/// current prefix, including subcommands and argument placeholders.
+///
+/// @param input - The current command input text (without leading `/`)
+///
+/// @returns Ghost text suggestion, or None if no suggestion available
+pub fn get_suggestion( input: &str ) -> Option<String> {
+    if input.is_empty() {
+        return None;
+    }
+
+    let has_trailing_space = input.ends_with( ' ' );
+    let words: Vec<&str> = input.split_whitespace().collect();
+
+    if words.is_empty() {
+        return None;
+    }
+
+    let first_word = words[0].to_lowercase();
+
+    // Still typing the first word (no space after it)
+    if words.len() == 1 && !has_trailing_space {
+        for def in COMMAND_DEFS {
+            if !def.name.starts_with( &first_word ) {
+                continue;
+            }
+
+            if def.name == first_word {
+                // Exact match — show hint/subs with leading space
+                let hint = build_def_hint( def );
+                if hint.is_empty() {
+                    return None;
+                }
+                return Some( format!( " {}", hint ) );
+            }
+
+            // Partial match — complete the name + show hint
+            let rest = &def.name[first_word.len()..];
+            let hint = build_def_hint( def );
+            if hint.is_empty() {
+                return Some( rest.to_string() );
+            }
+            return Some( format!( "{} {}", rest, hint ) );
+        }
+        return None;
+    }
+
+    // First word is complete — find exact match
+    let matched_def = COMMAND_DEFS.iter().find( |d| d.name == first_word )?;
+
+    // Command has subcommands
+    if !matched_def.subs.is_empty() {
+        if words.len() == 1 && has_trailing_space {
+            // Just typed "queue " — suggest first subcommand
+            let sub = &matched_def.subs[0];
+            if sub.hint.is_empty() {
+                return Some( sub.name.to_string() );
+            }
+            return Some( format!( "{} {}", sub.name, sub.hint ) );
+        }
+
+        if words.len() >= 2 {
+            let second_word = words[1].to_lowercase();
+            let has_space_after_second = words.len() > 2
+                || ( words.len() == 2 && has_trailing_space );
+
+            if !has_space_after_second {
+                // Still typing second word — match subcommand prefix
+                for sub in matched_def.subs {
+                    if !sub.name.starts_with( &second_word ) {
+                        continue;
+                    }
+
+                    if sub.name == second_word {
+                        // Exact sub match — show hint with leading space
+                        if sub.hint.is_empty() {
+                            return None;
+                        }
+                        return Some( format!( " {}", sub.hint ) );
+                    }
+
+                    // Partial sub match
+                    let rest = &sub.name[second_word.len()..];
+                    if sub.hint.is_empty() {
+                        return Some( rest.to_string() );
+                    }
+                    return Some( format!( "{} {}", rest, sub.hint ) );
+                }
+                return None;
+            }
+
+            // Second word is complete — check if it has a hint
+            if let Some( sub ) = matched_def.subs.iter().find( |s| s.name == second_word ) {
+                if words.len() == 2 && has_trailing_space && !sub.hint.is_empty() {
+                    return Some( sub.hint.to_string() );
+                }
+            }
+            // Typing actual args — no suggestion
+            return None;
+        }
+    }
+
+    // Command has hint (no subcommands)
+    if !matched_def.hint.is_empty() {
+        if words.len() == 1 && has_trailing_space {
+            return Some( matched_def.hint.to_string() );
+        }
+        // Typing actual args — no suggestion
+        return None;
+    }
+
+    None
+}
+
+
+/// Extracts the next word chunk from ghost text.
+///
+/// Consumes leading spaces and the next non-space word. Used when
+/// the user presses Right arrow to accept the next portion of the
+/// suggestion.
+///
+/// @param ghost - The current ghost text
+///
+/// @returns The next word chunk (including any leading spaces)
+pub fn get_next_word_chunk( ghost: &str ) -> String {
+    if ghost.is_empty() {
+        return String::new();
+    }
+
+    let mut chunk = String::new();
+    let mut chars = ghost.chars().peekable();
+
+    // Consume leading spaces
+    while let Some( &ch ) = chars.peek() {
+        if ch != ' ' {
+            break;
+        }
+        chunk.push( ch );
+        chars.next();
+    }
+
+    // Consume the next word (non-space characters)
+    while let Some( &ch ) = chars.peek() {
+        if ch == ' ' {
+            break;
+        }
+        chunk.push( ch );
+        chars.next();
+    }
+
+    chunk
+}
+
+
 #[cfg( test )]
 mod tests {
     use super::*;
@@ -365,5 +593,161 @@ mod tests {
     fn test_parse_missing_arg() {
         let result = Command::parse( "add" );
         assert!( matches!( result, Err( CommandError::MissingArgument( _ ) ) ) );
+    }
+
+
+    // --- Suggestion engine tests ---
+
+    #[test]
+    fn test_suggestion_partial_first_word() {
+        assert_eq!( get_suggestion( "go" ), Some( "to <path>".into() ) );
+        assert_eq!( get_suggestion( "pa" ), Some( "use".into() ) );
+        assert_eq!( get_suggestion( "sh" ), Some( "uffle".into() ) );
+        assert_eq!( get_suggestion( "n" ), Some( "ext".into() ) );
+        assert_eq!( get_suggestion( "h" ), Some( "elp".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_exact_command_with_hint() {
+        assert_eq!( get_suggestion( "goto" ), Some( " <path>".into() ) );
+        assert_eq!( get_suggestion( "repeat" ), Some( " [off|one|all]".into() ) );
+        assert_eq!( get_suggestion( "vol" ), Some( " [0-100]".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_exact_command_no_hint() {
+        assert_eq!( get_suggestion( "play" ), None );
+        assert_eq!( get_suggestion( "next" ), None );
+        assert_eq!( get_suggestion( "help" ), None );
+        assert_eq!( get_suggestion( "stop" ), None );
+    }
+
+
+    #[test]
+    fn test_suggestion_command_space_hint() {
+        assert_eq!( get_suggestion( "goto " ), Some( "<path>".into() ) );
+        assert_eq!( get_suggestion( "repeat " ), Some( "[off|one|all]".into() ) );
+        assert_eq!( get_suggestion( "seek " ), Some( "<time>".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_command_space_no_hint() {
+        assert_eq!( get_suggestion( "play " ), None );
+        assert_eq!( get_suggestion( "next " ), None );
+    }
+
+
+    #[test]
+    fn test_suggestion_typing_args() {
+        assert_eq!( get_suggestion( "goto /music" ), None );
+        assert_eq!( get_suggestion( "seek 1:30" ), None );
+        assert_eq!( get_suggestion( "search foo" ), None );
+    }
+
+
+    #[test]
+    fn test_suggestion_subcommand_parent_partial() {
+        assert_eq!( get_suggestion( "qu" ), Some( "eue add <path>".into() ) );
+        assert_eq!( get_suggestion( "playl" ), Some( "ist delete <name>".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_subcommand_parent_exact() {
+        assert_eq!( get_suggestion( "queue" ), Some( " add <path>".into() ) );
+        assert_eq!( get_suggestion( "playlist" ), Some( " delete <name>".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_subcommand_parent_space() {
+        assert_eq!( get_suggestion( "queue " ), Some( "add <path>".into() ) );
+        assert_eq!( get_suggestion( "playlist " ), Some( "delete <name>".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_subcommand_partial() {
+        assert_eq!( get_suggestion( "queue a" ), Some( "dd <path>".into() ) );
+        assert_eq!( get_suggestion( "queue cl" ), Some( "ear".into() ) );
+        assert_eq!( get_suggestion( "queue d" ), Some( "edup".into() ) );
+        assert_eq!( get_suggestion( "playlist d" ), Some( "elete <name>".into() ) );
+        assert_eq!( get_suggestion( "playlist s" ), Some( "ave <name>".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_subcommand_exact_with_hint() {
+        assert_eq!( get_suggestion( "queue add" ), Some( " <path>".into() ) );
+        assert_eq!( get_suggestion( "playlist save" ), Some( " <name>".into() ) );
+        assert_eq!( get_suggestion( "playlist delete" ), Some( " <name>".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_subcommand_exact_no_hint() {
+        assert_eq!( get_suggestion( "queue clear" ), None );
+        assert_eq!( get_suggestion( "queue remove" ), None );
+        assert_eq!( get_suggestion( "playlist list" ), None );
+    }
+
+
+    #[test]
+    fn test_suggestion_subcommand_space_hint() {
+        assert_eq!( get_suggestion( "queue add " ), Some( "<path>".into() ) );
+        assert_eq!( get_suggestion( "playlist save " ), Some( "<name>".into() ) );
+    }
+
+
+    #[test]
+    fn test_suggestion_subcommand_typing_args() {
+        assert_eq!( get_suggestion( "queue add /music" ), None );
+        assert_eq!( get_suggestion( "playlist save my_list" ), None );
+    }
+
+
+    #[test]
+    fn test_suggestion_empty_input() {
+        assert_eq!( get_suggestion( "" ), None );
+    }
+
+
+    #[test]
+    fn test_suggestion_no_match() {
+        assert_eq!( get_suggestion( "xyz" ), None );
+        assert_eq!( get_suggestion( "z" ), None );
+    }
+
+
+    // --- Next word chunk tests ---
+
+    #[test]
+    fn test_next_word_chunk_word_only() {
+        assert_eq!( get_next_word_chunk( "ause" ), "ause" );
+        assert_eq!( get_next_word_chunk( "to" ), "to" );
+    }
+
+
+    #[test]
+    fn test_next_word_chunk_first_of_multiple() {
+        assert_eq!( get_next_word_chunk( "eue add <path>" ), "eue" );
+        assert_eq!( get_next_word_chunk( "to <path>" ), "to" );
+    }
+
+
+    #[test]
+    fn test_next_word_chunk_with_leading_space() {
+        assert_eq!( get_next_word_chunk( " list" ), " list" );
+        assert_eq!( get_next_word_chunk( " add <path>" ), " add" );
+        assert_eq!( get_next_word_chunk( " <path>" ), " <path>" );
+    }
+
+
+    #[test]
+    fn test_next_word_chunk_empty() {
+        assert_eq!( get_next_word_chunk( "" ), "" );
     }
 }

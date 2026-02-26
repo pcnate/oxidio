@@ -1,7 +1,8 @@
 //! Axum HTTP server with embedded static assets and WebSocket upgrade.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{ Arc, Mutex };
 
 use axum::extract::{ State, WebSocketUpgrade };
 use axum::http::{ header, StatusCode, Uri };
@@ -31,6 +32,7 @@ struct StaticAssets;
 struct AppState {
     sender: CommandSender,
     broadcast_tx: Arc<broadcast::Sender<StateUpdate>>,
+    cover_art_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 
@@ -54,6 +56,7 @@ impl WebServerHandle {
 /// @param port - Port number
 /// @param sender - Command sender for WebSocket clients
 /// @param broadcast_tx - Broadcast sender for subscribing new clients
+/// @param cover_art_path - Shared cover art path from the processor
 ///
 /// @returns A handle for shutting down the server
 pub async fn start_web_server(
@@ -61,14 +64,17 @@ pub async fn start_web_server(
     port: u16,
     sender: CommandSender,
     broadcast_tx: broadcast::Sender<StateUpdate>,
+    cover_art_path: Arc<Mutex<Option<PathBuf>>>,
 ) -> Result<WebServerHandle, std::io::Error> {
     let state = AppState {
         sender,
         broadcast_tx: Arc::new( broadcast_tx ),
+        cover_art_path,
     };
 
     let app = Router::new()
         .route( "/ws", get( ws_handler ) )
+        .route( "/api/cover", get( cover_art_handler ) )
         .route( "/", get( index_handler ) )
         .fallback( static_handler )
         .layer( CorsLayer::permissive() )
@@ -109,6 +115,41 @@ async fn ws_handler(
     ws.on_upgrade( move |socket| {
         websocket::handle_ws( socket, sender, state_rx )
     })
+}
+
+
+/// Serves cover art for the currently playing track.
+///
+/// Returns the image file with appropriate content type, or 404 if no
+/// cover art is available.
+async fn cover_art_handler(
+    State( state ): State<AppState>,
+) -> impl IntoResponse {
+    let art_path = state.cover_art_path.lock()
+        .ok()
+        .and_then( |guard| guard.clone() );
+
+    match art_path {
+        Some( path ) => {
+            match tokio::fs::read( &path ).await {
+                Ok( data ) => {
+                    let mime = mime_guess::from_path( &path ).first_or_octet_stream();
+                    (
+                        StatusCode::OK,
+                        [( header::CONTENT_TYPE, mime.as_ref().to_string() ),
+                         ( header::CACHE_CONTROL, "no-cache".to_string() )],
+                        data,
+                    ).into_response()
+                }
+                Err( _ ) => {
+                    ( StatusCode::NOT_FOUND, "Cover art file not readable" ).into_response()
+                }
+            }
+        }
+        None => {
+            ( StatusCode::NOT_FOUND, "No cover art available" ).into_response()
+        }
+    }
 }
 
 

@@ -128,4 +128,17 @@ impl InputBuffer {
     pub fn is_empty( &self ) -> bool {
         self.content.is_empty()
     }
+
+
+    /// Returns true if the cursor is at the end of the content.
+    pub fn cursor_at_end( &self ) -> bool {
+        self.cursor >= self.content.len()
+    }
+
+
+    /// Inserts a string at the cursor position.
+    pub fn insert_str( &mut self, s: &str ) {
+        self.content.insert_str( self.cursor, s );
+        self.cursor += s.len();
+    }
 }

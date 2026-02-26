@@ -10,7 +10,7 @@ pub mod output;
 pub mod player;
 pub mod playlist;
 
-pub use command::{ Command, CommandError };
+pub use command::{ Command, CommandError, get_suggestion, get_next_word_chunk };
 pub use decoder::AudioMetadata;
 pub use output::VIS_BARS;
 pub use player::Player;

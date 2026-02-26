@@ -60,9 +60,10 @@
                 <div class="help-section">
                     <h3>Slash Commands</h3>
                     <div class="help-grid">
-                        <span class="key">/add &lt;path&gt;</span><span class="desc">Add file/folder to playlist</span>
-                        <span class="key">/clear</span><span class="desc">Clear playlist</span>
-                        <span class="key">/dedup</span><span class="desc">Remove duplicate tracks</span>
+                        <span class="key">/queue add &lt;path&gt;</span><span class="desc">Add file/folder to queue</span>
+                        <span class="key">/queue remove</span><span class="desc">Remove selected track</span>
+                        <span class="key">/queue clear</span><span class="desc">Clear queue</span>
+                        <span class="key">/queue dedup</span><span class="desc">Remove duplicate tracks</span>
                         <span class="key">/shuffle</span><span class="desc">Toggle shuffle mode</span>
                         <span class="key">/repeat [mode]</span><span class="desc">Set repeat (off/one/all)</span>
                         <span class="key">/playlist list</span><span class="desc">List saved playlists</span>
@@ -111,6 +112,7 @@
                     <button id="btn-shuffle" class="mode-btn" title="Toggle Shuffle">&#x1F500;</button>
                     <button id="btn-repeat" class="mode-btn" title="Cycle Repeat">&#x1F501;</button>
                 </div>
+                <img id="np-cover" class="hidden" alt="Cover art">
                 <div class="np-info">
                     <div class="np-title" id="np-title">No track loaded</div>
                     <div class="np-artist" id="np-artist"></div>
@@ -134,7 +136,10 @@
         <!-- Command bar -->
         <div id="command-bar" class="hidden">
             <span class="cmd-prefix">/</span>
-            <input type="text" id="cmd-input" autocomplete="off" spellcheck="false" placeholder="type a command...">
+            <div class="cmd-input-wrapper">
+                <input type="text" id="cmd-input" autocomplete="off" spellcheck="false" placeholder="type a command...">
+                <span id="cmd-ghost"></span>
+            </div>
         </div>
 
         <!-- Status bar -->
@@ -144,6 +149,12 @@
             <span class="conn-status" id="conn-status">Connected</span>
         </div>
     </div>
+
+    <!-- Context menu -->
+    <div id="context-menu" class="hidden">
+        <ul id="context-menu-items"></ul>
+    </div>
+
     <script src="app.js"></script>
 </body>
 </html>

@@ -30,6 +30,8 @@
     };
     let currentView = "playlist";
     let statusTimeout = null;
+    let selectedPlaylistIndex = null;
+    let selectedBrowserIndex = null;
 
 
     // --- WebSocket ---
@@ -105,6 +107,7 @@
                 Object.assign( state, msg );
                 delete state.type;
                 renderAll();
+                updateCoverArt( state.current_track );
                 break;
 
             case "position":
@@ -123,6 +126,7 @@
                 state.position_secs = 0;
                 renderNowPlaying();
                 renderPlaylist();
+                updateCoverArt( msg.track );
                 break;
 
             case "playlist_changed":
@@ -190,6 +194,9 @@
             if ( track.index === state.playlist_index ) {
                 li.classList.add( "playing" );
             }
+            if ( track.index === selectedPlaylistIndex ) {
+                li.classList.add( "selected" );
+            }
 
             const idx = document.createElement( "span" );
             idx.className = "index";
@@ -207,8 +214,27 @@
             li.appendChild( indicator );
             li.appendChild( name );
 
+            li.addEventListener( "click", function() {
+                selectedPlaylistIndex = track.index;
+                renderPlaylist();
+            });
+
             li.addEventListener( "dblclick", function() {
                 sendCommand( { cmd: "play_track", index: track.index } );
+            });
+
+            li.addEventListener( "contextmenu", function( e ) {
+                e.preventDefault();
+                selectedPlaylistIndex = track.index;
+                renderPlaylist();
+                var items = [
+                    { label: "\u25B6 Play", action: function() { sendCommand( { cmd: "play_track", index: track.index } ); } },
+                    { label: "\u2716 Remove", action: function() { sendCommand( { cmd: "remove_track", index: track.index } ); } },
+                    { separator: true },
+                    { label: "\u2191 Move Up", action: function() { if ( track.index > 0 ) sendCommand( { cmd: "move_track", from: track.index, to: track.index - 1 } ); } },
+                    { label: "\u2193 Move Down", action: function() { if ( track.index < state.playlist.length - 1 ) sendCommand( { cmd: "move_track", from: track.index, to: track.index + 1 } ); } },
+                ];
+                showContextMenu( e.clientX, e.clientY, items );
             });
 
             list.appendChild( li );
@@ -242,15 +268,38 @@
             li.appendChild( icon );
             li.appendChild( name );
 
+            if ( idx === selectedBrowserIndex ) {
+                li.classList.add( "selected" );
+            }
+
             li.addEventListener( "click", function() {
                 if ( entry.is_dir ) {
                     sendCommand( { cmd: "browse_open", index: idx } );
+                } else {
+                    selectedBrowserIndex = idx;
+                    renderBrowser();
                 }
             });
 
             li.addEventListener( "dblclick", function() {
                 if ( !entry.is_dir ) {
                     sendCommand( { cmd: "browse_add_to_playlist", index: idx } );
+                }
+            });
+
+            li.addEventListener( "contextmenu", function( e ) {
+                e.preventDefault();
+                selectedBrowserIndex = idx;
+                renderBrowser();
+                var items = [];
+                if ( entry.is_dir ) {
+                    items.push( { label: "\uD83D\uDCC1 Open", action: function() { sendCommand( { cmd: "browse_open", index: idx } ); } } );
+                    items.push( { label: "\u2795 Add Folder to Queue", action: function() { sendCommand( { cmd: "browse_add_to_playlist", index: idx } ); } } );
+                } else if ( entry.is_audio ) {
+                    items.push( { label: "\u2795 Add to Queue", action: function() { sendCommand( { cmd: "browse_add_to_playlist", index: idx } ); } } );
+                }
+                if ( items.length > 0 ) {
+                    showContextMenu( e.clientX, e.clientY, items );
                 }
             });
 
@@ -279,6 +328,24 @@
 
         renderPlayButton();
         renderProgress();
+    }
+
+
+    /**
+     * Updates the cover art image in the now-playing bar.
+     *
+     * @param track - The track info object (may be null)
+     */
+    function updateCoverArt( track ) {
+        var coverEl = document.getElementById( "np-cover" );
+
+        if ( track && track.has_cover_art ) {
+            coverEl.src = "/api/cover?t=" + Date.now();
+            coverEl.classList.remove( "hidden" );
+        } else {
+            coverEl.src = "";
+            coverEl.classList.add( "hidden" );
+        }
     }
 
 
@@ -499,6 +566,45 @@
                 sendCommand( { cmd: "dedup" } );
                 break;
 
+            case "remove":
+            case "rm":
+            case "del":
+                showStatus( "Hint: Use /queue remove or right-click a track" );
+                break;
+
+            case "queue":
+            case "q":
+                if ( !args ) { showStatus( "Usage: /queue add|remove|clear|dedup" ); return; }
+                var qSpaceIdx = args.indexOf( " " );
+                var qSub = qSpaceIdx >= 0 ? args.substring( 0, qSpaceIdx ).toLowerCase() : args.toLowerCase();
+                var qArg = qSpaceIdx >= 0 ? args.substring( qSpaceIdx + 1 ).trim() : null;
+
+                switch ( qSub ) {
+                    case "add":
+                    case "a":
+                        if ( !qArg ) { showStatus( "Usage: /queue add <path>" ); return; }
+                        sendCommand( { cmd: "add_path", path: qArg } );
+                        break;
+                    case "remove":
+                    case "rm":
+                    case "del":
+                        showStatus( "Select a track and use right-click → Remove, or use the TUI" );
+                        break;
+                    case "clear":
+                    case "cl":
+                        sendCommand( { cmd: "clear_playlist" } );
+                        break;
+                    case "dedup":
+                    case "dedupe":
+                    case "unique":
+                        sendCommand( { cmd: "dedup" } );
+                        break;
+                    default:
+                        showStatus( "Unknown queue subcommand: " + qSub );
+                        break;
+                }
+                break;
+
             case "playlist":
             case "pl":
                 if ( !args ) { showStatus( "Usage: /playlist list|save|load|delete <name>" ); return; }
@@ -646,6 +752,7 @@
         bar.classList.remove( "hidden" );
         input.value = "";
         input.focus();
+        clearCommandGhost();
     }
 
 
@@ -658,6 +765,62 @@
         bar.classList.add( "hidden" );
         input.value = "";
         input.blur();
+        clearCommandGhost();
+    }
+
+
+    // --- Context Menu ---
+
+
+    /**
+     * Shows a context menu at the given position with the given items.
+     *
+     * @param x - Mouse X position
+     * @param y - Mouse Y position
+     * @param items - Array of { label, action } or { separator: true }
+     */
+    function showContextMenu( x, y, items ) {
+        var menu = document.getElementById( "context-menu" );
+        var list = document.getElementById( "context-menu-items" );
+        list.innerHTML = "";
+
+        items.forEach( function( item ) {
+            var li = document.createElement( "li" );
+            if ( item.separator ) {
+                li.className = "separator";
+            } else {
+                li.textContent = item.label;
+                li.addEventListener( "click", function( e ) {
+                    e.stopPropagation();
+                    hideContextMenu();
+                    item.action();
+                });
+            }
+            list.appendChild( li );
+        });
+
+        menu.classList.remove( "hidden" );
+        menu.style.left = x + "px";
+        menu.style.top = y + "px";
+
+        // Keep menu within viewport
+        requestAnimationFrame( function() {
+            var rect = menu.getBoundingClientRect();
+            if ( rect.right > window.innerWidth ) {
+                menu.style.left = ( window.innerWidth - rect.width - 4 ) + "px";
+            }
+            if ( rect.bottom > window.innerHeight ) {
+                menu.style.top = ( window.innerHeight - rect.height - 4 ) + "px";
+            }
+        });
+    }
+
+
+    /**
+     * Hides the context menu.
+     */
+    function hideContextMenu() {
+        document.getElementById( "context-menu" ).classList.add( "hidden" );
     }
 
 
@@ -835,7 +998,29 @@
             } else if ( e.key === "Escape" ) {
                 e.preventDefault();
                 closeCommandBar();
+            } else if ( e.key === "ArrowRight" ) {
+                // Accept next word chunk from ghost text when cursor is at end
+                if ( cmdInput.selectionStart === cmdInput.value.length ) {
+                    var ghost = document.getElementById( "cmd-ghost" ).textContent;
+                    if ( ghost ) {
+                        e.preventDefault();
+                        var chunk = getNextWordChunk( ghost );
+                        if ( chunk ) {
+                            cmdInput.value += chunk;
+                            updateCommandGhost();
+                        }
+                    }
+                }
             }
+        });
+
+        cmdInput.addEventListener( "input", function() {
+            updateCommandGhost();
+        });
+
+        // Close context menu on click anywhere
+        document.addEventListener( "click", function() {
+            hideContextMenu();
         });
 
         // Keyboard shortcuts
@@ -888,6 +1073,210 @@
         const idx = views.indexOf( currentView );
         const next = views[ ( idx + 1 ) % views.length ];
         switchView( next );
+    }
+
+
+    // --- Command Suggestions ---
+
+
+    /** Command definitions for the suggestion engine (sorted alphabetically). */
+    var COMMAND_DEFS = [
+        { name: "goto", hint: "<path>", subs: [] },
+        { name: "help", hint: "", subs: [] },
+        { name: "home", hint: "", subs: [] },
+        { name: "next", hint: "", subs: [] },
+        { name: "pause", hint: "", subs: [] },
+        { name: "play", hint: "", subs: [] },
+        { name: "playlist", hint: "", subs: [
+            { name: "delete", hint: "<name>" },
+            { name: "list", hint: "" },
+            { name: "load", hint: "<name>" },
+            { name: "save", hint: "<name>" }
+        ]},
+        { name: "prev", hint: "", subs: [] },
+        { name: "queue", hint: "", subs: [
+            { name: "add", hint: "<path>" },
+            { name: "clear", hint: "" },
+            { name: "dedup", hint: "" },
+            { name: "remove", hint: "" }
+        ]},
+        { name: "quit", hint: "", subs: [] },
+        { name: "repeat", hint: "[off|one|all]", subs: [] },
+        { name: "seek", hint: "<time>", subs: [] },
+        { name: "shuffle", hint: "", subs: [] },
+        { name: "stop", hint: "", subs: [] },
+        { name: "vol", hint: "[0-100]", subs: [] }
+    ];
+
+
+    /**
+     * Builds a full hint string for a command definition.
+     *
+     * @param def - Command definition object
+     *
+     * @returns Hint string including first subcommand if applicable
+     */
+    function buildDefHint( def ) {
+        if ( def.subs && def.subs.length > 0 ) {
+            var sub = def.subs[0];
+            return sub.hint ? sub.name + " " + sub.hint : sub.name;
+        }
+        return def.hint || "";
+    }
+
+
+    /**
+     * Returns ghost text suggestion for the given command input.
+     *
+     * @param input - Current command input text (without leading /)
+     *
+     * @returns Ghost text string, or null if no suggestion
+     */
+    function getSuggestion( input ) {
+        if ( !input ) return null;
+
+        var hasTrailingSpace = input.endsWith( " " );
+        var words = input.trim().split( /\s+/ );
+
+        if ( words.length === 0 || ( words.length === 1 && words[0] === "" ) ) return null;
+
+        var firstWord = words[0].toLowerCase();
+
+        // Still typing the first word (no space after it)
+        if ( words.length === 1 && !hasTrailingSpace ) {
+            for ( var i = 0; i < COMMAND_DEFS.length; i++ ) {
+                var def = COMMAND_DEFS[i];
+                if ( !def.name.startsWith( firstWord ) ) continue;
+
+                if ( def.name === firstWord ) {
+                    // Exact match — show hint/subs with leading space
+                    var hint = buildDefHint( def );
+                    return hint ? " " + hint : null;
+                }
+
+                // Partial match — complete the name + show hint
+                var rest = def.name.substring( firstWord.length );
+                var hint2 = buildDefHint( def );
+                return hint2 ? rest + " " + hint2 : rest;
+            }
+            return null;
+        }
+
+        // First word is complete — find exact match
+        var matchedDef = null;
+        for ( var j = 0; j < COMMAND_DEFS.length; j++ ) {
+            if ( COMMAND_DEFS[j].name === firstWord ) {
+                matchedDef = COMMAND_DEFS[j];
+                break;
+            }
+        }
+        if ( !matchedDef ) return null;
+
+        // Command has subcommands
+        if ( matchedDef.subs && matchedDef.subs.length > 0 ) {
+            if ( words.length === 1 && hasTrailingSpace ) {
+                var sub = matchedDef.subs[0];
+                return sub.hint ? sub.name + " " + sub.hint : sub.name;
+            }
+
+            if ( words.length >= 2 ) {
+                var secondWord = words[1].toLowerCase();
+                var hasSpaceAfterSecond = words.length > 2 || ( words.length === 2 && hasTrailingSpace );
+
+                if ( !hasSpaceAfterSecond ) {
+                    // Still typing second word
+                    for ( var k = 0; k < matchedDef.subs.length; k++ ) {
+                        var s = matchedDef.subs[k];
+                        if ( !s.name.startsWith( secondWord ) ) continue;
+
+                        if ( s.name === secondWord ) {
+                            return s.hint ? " " + s.hint : null;
+                        }
+
+                        var subRest = s.name.substring( secondWord.length );
+                        return s.hint ? subRest + " " + s.hint : subRest;
+                    }
+                    return null;
+                }
+
+                // Second word complete — check for hint
+                for ( var m = 0; m < matchedDef.subs.length; m++ ) {
+                    if ( matchedDef.subs[m].name === secondWord ) {
+                        if ( words.length === 2 && hasTrailingSpace && matchedDef.subs[m].hint ) {
+                            return matchedDef.subs[m].hint;
+                        }
+                        break;
+                    }
+                }
+                return null;
+            }
+        }
+
+        // Command has hint (no subcommands)
+        if ( matchedDef.hint ) {
+            if ( words.length === 1 && hasTrailingSpace ) {
+                return matchedDef.hint;
+            }
+            return null;
+        }
+
+        return null;
+    }
+
+
+    /**
+     * Extracts the next word chunk from ghost text.
+     *
+     * @param ghost - Current ghost text string
+     *
+     * @returns Next word chunk including leading spaces
+     */
+    function getNextWordChunk( ghost ) {
+        if ( !ghost ) return "";
+
+        var i = 0;
+        var chunk = "";
+
+        // Consume leading spaces
+        while ( i < ghost.length && ghost[i] === " " ) {
+            chunk += ghost[i];
+            i++;
+        }
+
+        // Consume next word (non-space characters)
+        while ( i < ghost.length && ghost[i] !== " " ) {
+            chunk += ghost[i];
+            i++;
+        }
+
+        return chunk;
+    }
+
+
+    /**
+     * Updates the command ghost text based on current input.
+     */
+    function updateCommandGhost() {
+        var input = document.getElementById( "cmd-input" ).value;
+        var ghostEl = document.getElementById( "cmd-ghost" );
+        var suggestion = getSuggestion( input );
+
+        if ( suggestion ) {
+            // Offset ghost text by input length using ch units (monospace font)
+            ghostEl.textContent = suggestion;
+            ghostEl.style.paddingLeft = input.length + "ch";
+        } else {
+            ghostEl.textContent = "";
+            ghostEl.style.paddingLeft = "0";
+        }
+    }
+
+
+    /**
+     * Clears the command ghost text.
+     */
+    function clearCommandGhost() {
+        document.getElementById( "cmd-ghost" ).textContent = "";
     }
 
 

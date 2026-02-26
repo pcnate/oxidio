@@ -98,6 +98,8 @@ pub struct TrackInfo {
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
     pub duration_secs: Option<f64>,
+    #[serde( default )]
+    pub has_cover_art: bool,
 }
 
 

@@ -33,7 +33,7 @@ use input::{ InputBuffer, InputMode };
 use view::{ ViewMode, VisualizerStyle };
 
 use oxidio_core::{
-    command::{ self, RepeatModeArg },
+    command::{ self, get_suggestion, get_next_word_chunk, RepeatModeArg },
     library::LibraryScanner,
     player::PlaybackState,
     Command, Player, RepeatMode,
@@ -60,6 +60,7 @@ struct App {
     // Input state
     input_mode: InputMode,
     input_buffer: InputBuffer,
+    command_ghost: Option<String>,
 
     // Edit mode
     edit_mode: bool,
@@ -145,6 +146,7 @@ impl App {
             browser,
             input_mode: InputMode::Normal,
             input_buffer: InputBuffer::new(),
+            command_ghost: None,
             edit_mode: false,
             visualizer_style: VisualizerStyle::default(),
             volume,
@@ -800,14 +802,20 @@ impl App {
                 self.execute_command( &input );
                 self.input_mode = InputMode::Normal;
                 self.input_buffer.clear();
+                self.command_ghost = None;
+                return;
             }
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
                 self.input_buffer.clear();
+                self.command_ghost = None;
+                return;
             }
             KeyCode::Backspace => {
                 if self.input_buffer.is_empty() {
                     self.input_mode = InputMode::Normal;
+                    self.command_ghost = None;
+                    return;
                 } else {
                     self.input_buffer.backspace();
                 }
@@ -819,7 +827,18 @@ impl App {
                 self.input_buffer.move_left();
             }
             KeyCode::Right => {
-                self.input_buffer.move_right();
+                if self.input_buffer.cursor_at_end() {
+                    if let Some( ref ghost ) = self.command_ghost.clone() {
+                        let chunk = get_next_word_chunk( ghost );
+                        if !chunk.is_empty() {
+                            self.input_buffer.insert_str( &chunk );
+                        }
+                    } else {
+                        self.input_buffer.move_right();
+                    }
+                } else {
+                    self.input_buffer.move_right();
+                }
             }
             KeyCode::Home => {
                 self.input_buffer.move_home();
@@ -832,6 +851,13 @@ impl App {
             }
             _ => {}
         }
+        self.update_command_ghost();
+    }
+
+
+    /// Updates the command ghost text based on current input.
+    fn update_command_ghost( &mut self ) {
+        self.command_ghost = get_suggestion( self.input_buffer.content() );
     }
 
 
@@ -1179,6 +1205,7 @@ fn main() -> Result<()> {
     // Spawn command processor on a background thread with its own tokio runtime
     let web_sender = channel.sender();
     let web_broadcast_tx = channel.broadcast_tx();
+    let web_cover_art = processor.cover_art_path();
     let web_enabled = args.resolve_web_enabled( settings_web_enabled );
     let web_bind = args.web_bind.clone();
     let web_port = args.web_port;
@@ -1206,7 +1233,7 @@ fn main() -> Result<()> {
                     .expect( "Failed to create tokio runtime for web server" );
                 rt.block_on( async {
                     match oxidio_web::start_web_server(
-                        &web_bind, web_port, web_sender, web_broadcast_tx,
+                        &web_bind, web_port, web_sender, web_broadcast_tx, web_cover_art,
                     ).await {
                         Ok( handle ) => {
                             tracing::info!( "Web server started on http://{}:{}", web_bind, web_port );
@@ -2045,15 +2072,25 @@ fn draw_settings( frame: &mut Frame, app: &App, area: Rect ) {
 
 
 fn draw_status_bar( frame: &mut Frame, app: &App, area: Rect ) {
-    let ( text, style ) = match app.input_mode {
+    match app.input_mode {
         InputMode::Command => {
-            ( format!( "/{}", app.input_buffer.content() ), Style::default().fg( Color::Yellow ) )
+            let input_text = format!( "/{}", app.input_buffer.content() );
+            let mut spans = vec![
+                Span::styled( input_text, Style::default().fg( Color::Yellow ) ),
+            ];
+            if let Some( ref ghost ) = app.command_ghost {
+                spans.push( Span::styled( ghost.clone(), Style::default().fg( Color::DarkGray ) ) );
+            }
+            let status = Paragraph::new( Line::from( spans ) );
+            frame.render_widget( status, area );
         }
         InputMode::Search => {
-            ( format!( "Search: {}", app.input_buffer.content() ), Style::default().fg( Color::Yellow ) )
+            let text = format!( "Search: {}", app.input_buffer.content() );
+            let status = Paragraph::new( text ).style( Style::default().fg( Color::Yellow ) );
+            frame.render_widget( status, area );
         }
         InputMode::Normal => {
-            if let Some( ref msg ) = app.status_message {
+            let ( text, style ) = if let Some( ref msg ) = app.status_message {
                 ( msg.clone(), Style::default().fg( Color::Green ) )
             } else {
                 let hint = match app.view_mode {
@@ -2065,12 +2102,11 @@ fn draw_status_bar( frame: &mut Frame, app: &App, area: Rect ) {
                     ViewMode::Settings => " [↑↓]Navigate [Enter/Space]Toggle [Tab]Views [Esc]Close ",
                 };
                 ( hint.to_string(), Style::default().fg( Color::DarkGray ) )
-            }
+            };
+            let status = Paragraph::new( text ).style( style );
+            frame.render_widget( status, area );
         }
-    };
-
-    let status = Paragraph::new( text ).style( style );
-    frame.render_widget( status, area );
+    }
 
     // Show cursor in command/search mode
     if app.input_mode != InputMode::Normal {

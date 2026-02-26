@@ -4,8 +4,8 @@
 //! control channel, executes them against the shared `Player`, and broadcasts
 //! state updates to all subscribers.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{ Path, PathBuf };
+use std::sync::{ Arc, Mutex };
 use std::time::{ Duration, Instant };
 
 use tokio::sync::{ broadcast, mpsc };
@@ -260,6 +260,9 @@ pub struct CommandProcessor {
 
     // Current view mode (tracked for connected clients)
     view_mode: String,
+
+    // Shared cover art path (read by web server's /api/cover endpoint)
+    cover_art_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 
@@ -306,7 +309,16 @@ impl CommandProcessor {
             last_position_broadcast: Instant::now(),
             last_vis_broadcast: Instant::now(),
             view_mode,
+            cover_art_path: Arc::new( Mutex::new( None ) ),
         }
+    }
+
+
+    /// Returns a cloneable reference to the shared cover art path.
+    ///
+    /// Used by the web server to serve album art via `/api/cover`.
+    pub fn cover_art_path( &self ) -> Arc<Mutex<Option<PathBuf>>> {
+        Arc::clone( &self.cover_art_path )
     }
 
 
@@ -856,6 +868,13 @@ impl CommandProcessor {
         let metadata = self.player.metadata();
         let duration = self.player.duration();
 
+        // Find and cache cover art for web UI
+        let cover_art = find_cover_art( path );
+        let has_cover_art = cover_art.is_some();
+        if let Ok( mut guard ) = self.cover_art_path.lock() {
+            *guard = cover_art;
+        }
+
         TrackInfo {
             path: path.to_string_lossy().to_string(),
             title: metadata.as_ref().and_then( |m| m.title.clone() ),
@@ -870,6 +889,7 @@ impl CommandProcessor {
             sample_rate: metadata.as_ref().and_then( |m| m.sample_rate ),
             channels: metadata.as_ref().and_then( |m| m.channels ),
             duration_secs: duration.map( |d| d.as_secs_f64() ),
+            has_cover_art,
         }
     }
 
@@ -903,6 +923,58 @@ impl CommandProcessor {
     pub fn settings( &self ) -> &ProcessorSettings {
         &self.settings
     }
+}
+
+
+/// Searches for album art image files in the same directory as the track.
+///
+/// Looks for common cover art filenames (cover, folder, album, front, etc.)
+/// with image extensions (jpg, jpeg, png, bmp, gif). Prioritizes exact name
+/// matches over generic image files.
+///
+/// @param track_path - Path to the audio file
+///
+/// @returns Path to the cover art file, or None if not found
+fn find_cover_art( track_path: &Path ) -> Option<PathBuf> {
+    let parent = track_path.parent()?;
+
+    let art_names = [
+        "cover", "folder", "album", "front", "art", "albumart", "album_art",
+    ];
+    let extensions = [ "jpg", "jpeg", "png", "bmp", "gif" ];
+
+    let mut found_path: Option<PathBuf> = None;
+
+    match std::fs::read_dir( parent ) {
+        Ok( entries ) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let filename = path.file_stem()
+                    .and_then( |s| s.to_str() )
+                    .map( |s| s.to_lowercase() );
+                let ext = path.extension()
+                    .and_then( |e| e.to_str() )
+                    .map( |e| e.to_lowercase() );
+
+                if let ( Some( name ), Some( ext ) ) = ( filename, ext ) {
+                    if extensions.contains( &ext.as_str() ) {
+                        if art_names.contains( &name.as_str() ) {
+                            found_path = Some( path );
+                            break;
+                        }
+                        if found_path.is_none() {
+                            found_path = Some( path );
+                        }
+                    }
+                }
+            }
+        }
+        Err( e ) => {
+            tracing::warn!( "Failed to read directory {:?}: {}", parent, e );
+        }
+    }
+
+    found_path
 }
 
 
